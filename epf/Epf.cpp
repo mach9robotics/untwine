@@ -10,12 +10,19 @@
  *                                                                           *
  ****************************************************************************/
 
+#include <iostream>
+
 #include "Epf.hpp"
 #include "EpfTypes.hpp"
 #include "FileProcessor.hpp"
 #include "Reprocessor.hpp"
 #include "Writer.hpp"
 #include "../untwine/Common.hpp"
+
+namespace
+{
+    constexpr int MaxReprocessIterations = 5;
+}
 
 namespace untwine
 {
@@ -72,42 +79,70 @@ void Epf::run(ProgressWriter& progress, std::vector<FileInfo>& fileInfos)
     m_pool.go();
     progress.setPercent(.4);
 
-    // Get totals from the current writer that are greater than the MaxPointsPerNode.
-    // Each of these voxels that is too large will be reprocessed.
-    //ABELL - would be nice to avoid this copy, but it probably doesn't matter much.
-    Totals totals = m_writer->totals(MaxPointsPerNode);
-
-    // Progress for reprocessing goes from .4 to .6.
-    progress.setPercent(.4);
-    progress.setIncrement(.2 / (std::max)((size_t)1, totals.size()));
-
-    // Make a new writer since we stopped the old one. Could restart, but why bother with
-    // extra code...
-    m_writer.reset(new Writer(m_b.opts.tempDir, 4, m_b.pointSize));
-    m_pool.trap(true, "Unknown error in Reprocessor");
-    for (auto& t : totals)
+    // Iteratively reprocess oversized voxels until all are under MaxPointsPerNode.
+    // Each iteration subdivides oversized voxels into finer ones. The loop continues
+    // until no oversized voxels remain or a maximum iteration count is reached.
+    int iteration = 0;
+    while (true)
     {
-        VoxelKey key = t.first;
-        int numPoints = t.second;
-        int pointSize = m_b.pointSize;
-        std::string tempDir = m_b.opts.tempDir;
+        // Get totals from the current writer that are greater than the MaxPointsPerNode.
+        // Each of these voxels that is too large will be reprocessed.
+        Totals totals = m_writer->totals(MaxPointsPerNode);
 
-        // Create a reprocessor thread. Note that the grid is copied by value and
-        // its level is re-calculated based on the number of points.
-        m_pool.add([&progress, key, numPoints, pointSize, tempDir, this]()
+        // If no oversized voxels remain, we're done.
+        if (totals.empty())
+            break;
+
+        // Safety valve: prevent infinite loops in pathological cases.
+        if (iteration >= MaxReprocessIterations)
         {
-            Reprocessor r(key, numPoints, pointSize, tempDir, m_grid, m_writer.get());
-            r.run();
-            progress.writeIncrement("Reprocessed voxel " + key.toString());
-        });
-    }
-    m_pool.stop();
-    // If the Reprocessors had an error, throw.
-    errors = m_pool.clearErrors();
-    if (errors.size())
-        throw FatalError(errors.front());
+            std::cerr << "Warning: Reprocessing did not converge after " << MaxReprocessIterations
+                      << " iterations. " << totals.size() << " voxels still exceed MaxPointsPerNode ("
+                      << MaxPointsPerNode << " points). Proceeding with BU phase." << std::endl;
+            break;
+        }
 
-    m_writer->stop();
+        iteration++;
+
+        // Progress for reprocessing goes from .4 to .6, distributed across all iterations.
+        // Estimate remaining progress based on iteration count.
+        double iterationProgress = 0.4 + (0.2 * iteration / (MaxReprocessIterations + 1));
+        progress.setPercent(iterationProgress);
+        progress.setIncrement(0.2 / ((MaxReprocessIterations + 1) * (std::max)((size_t)1, totals.size())));
+
+        // Make a new writer since we stopped the old one.
+        m_writer.reset(new Writer(m_b.opts.tempDir, 4, m_b.pointSize));
+        m_pool.trap(true, "Unknown error in Reprocessor");
+        for (auto& t : totals)
+        {
+            VoxelKey key = t.first;
+            int numPoints = t.second;
+            int pointSize = m_b.pointSize;
+            std::string tempDir = m_b.opts.tempDir;
+
+            // Create a reprocessor thread. Note that the grid is copied by value and
+            // its level is re-calculated based on the number of points.
+            m_pool.add([&progress, key, numPoints, pointSize, tempDir, this]()
+            {
+                Reprocessor r(key, numPoints, pointSize, tempDir, m_grid, m_writer.get());
+                r.run();
+                progress.writeIncrement("Reprocessed voxel " + key.toString());
+            });
+        }
+        m_pool.stop();
+        // If the Reprocessors had an error, throw.
+        errors = m_pool.clearErrors();
+        if (errors.size())
+            throw FatalError(errors.front());
+
+        m_writer->stop();
+
+        // Restart the pool for potential next iteration.
+        m_pool.go();
+    }
+
+    // Ensure progress is at .6 when reprocessing is complete.
+    progress.setPercent(.6);
 }
 
 } // namespace epf
