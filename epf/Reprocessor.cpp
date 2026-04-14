@@ -47,7 +47,11 @@ Reprocessor::Reprocessor(const VoxelKey& k, int numPoints, int pointSize,
     // We're going to steal points from the leaf nodes for sampling, so unless the
     // spatial distribution is really off, this should be fine and pretty conservative.
 
-    m_grid.resetLevel(m_grid.maxLevel() + m_levels);
+    // Use the input voxel's actual level as the base, not m_grid.maxLevel().
+    // In iterative reprocessing, input voxels from previous iterations are at
+    // deeper levels than the initial EPF grid. Using m_grid.maxLevel() would
+    // regress to a coarser grid, causing data corruption and non-convergence.
+    m_grid.resetLevel(k.level() + m_levels);
     m_filename = outputDir + "/" + k.toString() + ".bin";
 }
 
