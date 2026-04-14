@@ -17,19 +17,58 @@
 #include "Writer.hpp"
 #include "../untwine/Common.hpp"
 
+#include <pdal/util/FileUtils.hpp>
+#include <dirlist.hpp>  // untwine/os
+#include <regex>
+#include <iostream>
+
 namespace untwine
 {
 namespace epf
 {
 
+constexpr int MaxRetileIterations = 3;
+
 static_assert(MaxBuffers > NumFileProcessors, "MaxBuffers must be greater than NumFileProcessors.");
 Epf::Epf(BaseInfo& common) :
     m_b(common), m_grid(m_b.bounds, m_b.numPoints, m_b.opts.level, m_b.opts.doCube),
-    m_pool(NumFileProcessors)
+    m_pool(NumFileProcessors), m_userSpecifiedLevel(m_b.opts.level != -1)
 {}
 
 Epf::~Epf()
 {}
+
+void Epf::deleteBinFiles()
+{
+    std::regex re("[0-9]+-[0-9]+-[0-9]+-[0-9]+\\.bin");
+    std::smatch sm;
+
+    const std::vector<std::string>& files = os::directoryList(m_b.opts.tempDir);
+    for (const std::string& f : files)
+        if (std::regex_match(f, sm, re))
+            pdal::FileUtils::deleteFile(m_b.opts.tempDir + "/" + f);
+}
+
+void Epf::runFileProcessors(std::vector<FileInfo>& fileInfos, ProgressWriter& progress)
+{
+    m_pool.trap(true, "Unknown error in FileProcessor");
+    for (const FileInfo& fi : fileInfos)
+    {
+        m_pool.add([&fi, &progress, pointSize = m_b.pointSize, xform = m_b.xform, this]()
+        {
+            FileProcessor fp(fi, pointSize, m_grid, xform, m_writer.get(), progress);
+            fp.run();
+        });
+    }
+    m_pool.join();
+    m_writer->stop();
+
+    StringList errors = m_pool.clearErrors();
+    if (errors.size())
+        throw FatalError(errors.front());
+
+    m_pool.go();
+}
 
 void Epf::run(ProgressWriter& progress, std::vector<FileInfo>& fileInfos)
 {
@@ -47,29 +86,53 @@ void Epf::run(ProgressWriter& progress, std::vector<FileInfo>& fileInfos)
 
     progress.setPointIncrementer(m_b.numPoints, 40);
 
-    // Add the files to the processing pool
-    m_pool.trap(true, "Unknown error in FileProcessor");
-    for (const FileInfo& fi : fileInfos)
+    // Run initial tiling pass
+    runFileProcessors(fileInfos, progress);
+
+    // Re-tile loop: If the majority of leaf voxels exceed MaxPointsPerNode, the initial
+    // level calculation was likely wrong due to bbox inflation or sparse occupancy.
+    // It's more efficient to recognize this systemic error and re-tile at a deeper level
+    // than to let the reprocessor handle each oversized voxel individually.
+    // Skip this check if the user explicitly specified a level.
+    int retileIterations = 0;
+    while (!m_userSpecifiedLevel)
     {
-        m_pool.add([&fi, &progress, pointSize = m_b.pointSize, xform = m_b.xform, this]()
+        const Totals& allTotals = m_writer->totals();
+        Totals oversized = m_writer->totals(MaxPointsPerNode);
+
+        // If less than half of the voxels are oversized, let the reprocessor handle them.
+        if (oversized.size() <= allTotals.size() / 2)
+            break;
+
+        // Cap the number of re-tile iterations to prevent runaway re-tiling.
+        retileIterations++;
+        if (retileIterations > MaxRetileIterations)
         {
-            FileProcessor fp(fi, pointSize, m_grid, xform, m_writer.get(), progress);
-            fp.run();
-        });
+            std::cerr << "Warning: Re-tile iteration cap (" << MaxRetileIterations
+                      << ") reached. " << oversized.size() << " of " << allTotals.size()
+                      << " voxels still exceed MaxPointsPerNode. "
+                      << "Continuing with reprocessor.\n";
+            break;
+        }
+
+        // Majority of voxels are oversized — level is wrong. Bump by 1.
+        int newLevel = m_grid.maxLevel() + 1;
+        std::cerr << "Re-tiling: " << oversized.size() << " of " << allTotals.size()
+                  << " voxels exceed MaxPointsPerNode. "
+                  << "Increasing level from " << m_grid.maxLevel() << " to " << newLevel
+                  << " (iteration " << retileIterations << ")\n";
+
+        // Delete all .bin files from the previous pass
+        deleteBinFiles();
+
+        // Reset the grid to the new level
+        m_grid.resetLevel(newLevel);
+
+        // Re-run the full EPF tiling at the new level
+        m_writer.reset(new Writer(m_b.opts.tempDir, NumWriters, m_b.pointSize));
+        runFileProcessors(fileInfos, progress);
     }
 
-    // Wait for  all the processors to finish and restart.
-    m_pool.join();
-    // Tell the writer that it can exit. stop() will block until the writer threads
-    // are finished.  stop() will throw if an error occurred during writing.
-    m_writer->stop();
-
-    // If the FileProcessors had an error, throw.
-    StringList errors = m_pool.clearErrors();
-    if (errors.size())
-        throw FatalError(errors.front());
-
-    m_pool.go();
     progress.setPercent(.4);
 
     // Get totals from the current writer that are greater than the MaxPointsPerNode.
@@ -103,7 +166,7 @@ void Epf::run(ProgressWriter& progress, std::vector<FileInfo>& fileInfos)
     }
     m_pool.stop();
     // If the Reprocessors had an error, throw.
-    errors = m_pool.clearErrors();
+    StringList errors = m_pool.clearErrors();
     if (errors.size())
         throw FatalError(errors.front());
 

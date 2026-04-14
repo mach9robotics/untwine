@@ -39,10 +39,14 @@ public:
     void run(ProgressWriter& progress, std::vector<FileInfo>& fileInfos);
 
 private:
+    void deleteBinFiles();
+    void runFileProcessors(std::vector<FileInfo>& fileInfos, ProgressWriter& progress);
+
     BaseInfo& m_b;
     Grid m_grid;
     std::unique_ptr<Writer> m_writer;
     ThreadPool m_pool;
+    bool m_userSpecifiedLevel;
 };
 
 } // namespace epf
