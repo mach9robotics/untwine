@@ -13,6 +13,8 @@
 #include <fstream>
 #include <vector>
 
+#include <pdal/util/FileUtils.hpp>
+
 #include "OctantInfo.hpp"
 #include "../untwine/Common.hpp"
 
@@ -46,6 +48,8 @@ void OctantInfo::mergeSmallFiles(const std::string tempDir, size_t pointSize)
                 throw FatalError("Couldn't open file '" + filename + "' to merge.");
             in.read(buf.data(), bytes);
             out.write(buf.data(), bytes);
+            in.close();
+            pdal::FileUtils::deleteFile(filename);
             totalPoints += numPoints;
             it = m_fileInfos.erase(it);
         }
