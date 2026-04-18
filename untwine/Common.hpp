@@ -89,6 +89,7 @@ public:
                         std::numeric_limits<double>::quiet_NaN(),
                         std::numeric_limits<double>::quiet_NaN() } };
     uint64_t numPoints {0};
+    double fillRatio {1.0};
 };
 
 // We make a special dimension to store the bits (class flags, scanner channel, scan dir, eofl).

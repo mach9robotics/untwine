@@ -24,7 +24,8 @@ namespace epf
 
 static_assert(MaxBuffers > NumFileProcessors, "MaxBuffers must be greater than NumFileProcessors.");
 Epf::Epf(BaseInfo& common) :
-    m_b(common), m_grid(m_b.bounds, m_b.numPoints, m_b.opts.level, m_b.opts.doCube),
+    m_b(common), m_grid(m_b.bounds, m_b.numPoints, m_b.opts.level, m_b.opts.doCube,
+                        m_b.fillRatio),
     m_pool(NumFileProcessors)
 {}
 

@@ -60,6 +60,7 @@ std::vector<FileInfo> FilePrep::run()
     determineDims(fileInfos, outputLayout);
     determineScale(fileInfos);
     determineBounds();
+    computeFillRatio(fileInfos);
     determineOffset(fileInfos);
     determineSrs(fileInfos);
 
@@ -115,6 +116,56 @@ void FilePrep::determineBounds()
     m_b.bounds.maxx += m_b.xform.scale.x;
     m_b.bounds.maxy += m_b.xform.scale.y;
     m_b.bounds.maxz += m_b.xform.scale.z;
+}
+
+
+void FilePrep::computeFillRatio(const std::vector<FileInfo>& fileInfos)
+{
+    // Estimate what fraction of the octree cube volume is actually occupied by data.
+    // Rasterize file bounding boxes onto a coarse 2D XY grid within the cube bounds,
+    // then multiply by the Z fill ratio. This handles overlapping files correctly
+    // (each cell is counted once) and disjoint files correctly (gap cells are not counted).
+
+    const int GridRes = 512;
+    double cubeXSize = m_b.bounds.maxx - m_b.bounds.minx;
+    double cubeYSize = m_b.bounds.maxy - m_b.bounds.miny;
+    double cubeZSize = m_b.bounds.maxz - m_b.bounds.minz;
+
+    if (cubeXSize <= 0 || cubeYSize <= 0 || cubeZSize <= 0)
+        return;
+
+    double cellW = cubeXSize / GridRes;
+    double cellH = cubeYSize / GridRes;
+
+    std::vector<bool> occupied(GridRes * GridRes, false);
+
+    for (const FileInfo& fi : fileInfos)
+    {
+        int x0 = (std::max)(0, (int)((fi.bounds.minx - m_b.bounds.minx) / cellW));
+        int y0 = (std::max)(0, (int)((fi.bounds.miny - m_b.bounds.miny) / cellH));
+        int x1 = (std::min)(GridRes - 1, (int)((fi.bounds.maxx - m_b.bounds.minx) / cellW));
+        int y1 = (std::min)(GridRes - 1, (int)((fi.bounds.maxy - m_b.bounds.miny) / cellH));
+
+        for (int y = y0; y <= y1; ++y)
+            for (int x = x0; x <= x1; ++x)
+                occupied[y * GridRes + x] = true;
+    }
+
+    int occupiedCount = 0;
+    for (bool b : occupied)
+        if (b) occupiedCount++;
+
+    double xyFill = (double)occupiedCount / (GridRes * GridRes);
+
+    // Z fill: ratio of actual data Z range to cube Z extent.
+    double dataZRange = m_trueBounds.maxz - m_trueBounds.minz;
+    double zFill = (cubeZSize > 0) ? dataZRange / cubeZSize : 1.0;
+
+    m_b.fillRatio = xyFill * zFill;
+
+    // Clamp to sane range.
+    if (m_b.fillRatio <= 0 || m_b.fillRatio > 1.0)
+        m_b.fillRatio = 1.0;
 }
 
 void FilePrep::fillMetadata(const pdal::PointLayout& layout)
