@@ -126,7 +126,7 @@ void FilePrep::computeFillRatio(const std::vector<FileInfo>& fileInfos)
     // then multiply by the Z fill ratio. This handles overlapping files correctly
     // (each cell is counted once) and disjoint files correctly (gap cells are not counted).
 
-    const int GridRes = 512;
+    const int GridRes = 1024;
     double cubeXSize = m_b.bounds.maxx - m_b.bounds.minx;
     double cubeYSize = m_b.bounds.maxy - m_b.bounds.miny;
     double cubeZSize = m_b.bounds.maxz - m_b.bounds.minz;
