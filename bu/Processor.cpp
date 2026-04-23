@@ -50,6 +50,13 @@ void Processor::run()
     {
         runLocal();
     }
+    catch (const ChunkIntegrityError& ex)
+    {
+        // Flag the error type so main() rethrows ChunkIntegrityError for a
+        // distinct retryable exit code rather than generic -1.
+        m_manager.queueWithChunkIntegrityError(m_vi.octant(), ex.what());
+        return;
+    }
     catch (const std::exception& ex)
     {
         m_manager.queueWithError(m_vi.octant(), ex.what());
@@ -470,7 +477,8 @@ void Processor::createChunk(const VoxelKey& key, pdal::PointViewPtr view)
     for (DimType dim : m_extraDims)
         ebCount += layout->dimSize(dim.m_id);
 
-    std::vector<char> buf(lazperf::baseCount(m_b.pointFormatId) + ebCount);
+    const int recordSize = lazperf::baseCount(m_b.pointFormatId) + ebCount;
+    std::vector<char> buf(recordSize);
     lazperf::writer::chunk_compressor compressor(m_b.pointFormatId, ebCount);
     for (PointId idx = 0; idx < view->size(); ++idx)
     {
@@ -479,6 +487,27 @@ void Processor::createChunk(const VoxelKey& key, pdal::PointViewPtr view)
         compressor.compress(buf.data());
     }
     std::vector<unsigned char> chunk = compressor.done();
+
+    // Self-verify the chunk round-trips through the decompressor. Untwine has
+    // a rare non-deterministic bug where the compressed bytes decode to fewer
+    // points than chunk_count_ claims; writing that to disk silently corrupts
+    // the COPC and downstream consumers raise obscure errors. Fail fast so the
+    // caller can retry (see ChunkIntegrityExitCode in FatalError.hpp).
+    try
+    {
+        lazperf::reader::chunk_decompressor decomp(m_b.pointFormatId, ebCount,
+            reinterpret_cast<const char *>(chunk.data()));
+        std::vector<char> verifyBuf(recordSize);
+        for (size_t i = 0; i < view->size(); ++i)
+            decomp.decompress(verifyBuf.data());
+    }
+    catch (const std::exception& ex)
+    {
+        throw ChunkIntegrityError(
+            "Chunk integrity self-verify failed for key " + key.toString() +
+            " (declared " + std::to_string(view->size()) + " points in " +
+            std::to_string(chunk.size()) + " bytes): " + ex.what());
+    }
 
     uint64_t location = m_manager.newChunk(key, chunk.size(), (uint32_t)view->size());
 

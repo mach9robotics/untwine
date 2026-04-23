@@ -188,6 +188,14 @@ int main(int argc, char *argv[])
         progress.writeErrorMessage(err.what());
         status = -1;
     }
+    catch (const untwine::ChunkIntegrityError& err)
+    {
+        // Distinct exit code lets orchestrators (e.g. ingest pipeline) retry
+        // rather than surface this as a hard failure. The corruption is
+        // non-deterministic — rerunning typically produces a clean COPC.
+        progress.writeErrorMessage(err.what());
+        status = untwine::ChunkIntegrityExitCode;
+    }
     catch (const untwine::FatalError& err)
     {
         progress.writeErrorMessage(err.what());
