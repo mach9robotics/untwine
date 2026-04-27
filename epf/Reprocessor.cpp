@@ -42,7 +42,16 @@ Reprocessor::Reprocessor(const VoxelKey& k, int numPoints, int pointSize,
     //  =>
     // log2(numPoints / MaxPointsPerNode) = 2n
 
-    m_levels = (int)std::ceil(log2((double)numPoints / MaxPointsPerNode) / 2);
+    // Floor m_levels at 1 so children always go to a strictly deeper level than
+    // the parent. When numPoints == MaxPointsPerNode exactly, the formula gives
+    // m_levels == 0; the reprocessor's grid then matches the input voxel's
+    // grid and every output VoxelKey collides with the input key. In iterative
+    // reprocessing this means a peer Reprocessor's mmap of path(K) survives
+    // across the writer-append, deleteFile(path(K)) at end of run(), and a
+    // subsequent re-create — leading to a SIGBUS in the peer's read loop.
+    // Forcing one level of subdivision is harmless when the voxel is at the
+    // cap and breaks the same-key write/read collision.
+    m_levels = (std::max)(1, (int)std::ceil(log2((double)numPoints / MaxPointsPerNode) / 2));
 
     // We're going to steal points from the leaf nodes for sampling, so unless the
     // spatial distribution is really off, this should be fine and pretty conservative.
