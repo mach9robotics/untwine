@@ -25,7 +25,7 @@ namespace untwine
 namespace epf
 {
 
-int Grid::calcLevel(uint64_t numPoints, bool cubic) const
+int Grid::calcLevel(uint64_t numPoints, bool cubic, double fillRatio) const
 {
     double xside = m_bounds.maxx - m_bounds.minx;
     double yside = m_bounds.maxy - m_bounds.miny;
@@ -33,20 +33,28 @@ int Grid::calcLevel(uint64_t numPoints, bool cubic) const
 
     double side = (std::max)(xside, (std::max)(yside, zside));
 
+    // Adjust point count to reflect actual density within the occupied volume.
+    // If data only fills a fraction of the cube, points are denser in the occupied
+    // region than a uniform distribution would suggest. This avoids underestimating
+    // the grid level for disjoint or spatially sparse inputs.
+    double pts = (double)numPoints;
+    if (fillRatio > 0 && fillRatio < 1.0)
+        pts = numPoints / fillRatio;
+
     int level = 0;
-    while (numPoints > MaxPointsPerNode)
+    while (pts > MaxPointsPerNode)
     {
         if (cubic)
         {
             if (xside >= side)
-                numPoints /= 2;
+                pts /= 2;
             if (yside >= side)
-                numPoints /= 2;
+                pts /= 2;
             if (zside >= side)
-                numPoints /= 2;
+                pts /= 2;
         }
         else
-            numPoints /= 8;
+            pts /= 8;
         side /= 2;
         level++;
     }

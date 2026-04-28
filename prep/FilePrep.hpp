@@ -51,6 +51,7 @@ private:
     void determineSrs(const std::vector<FileInfo>& infos);
     void determineScale(const std::vector<FileInfo>& infos);
     void determineBounds();
+    void computeFillRatio(const std::vector<FileInfo>& fileInfos);
     void determineOffset(const std::vector<FileInfo>& infos);
     bool determineOffsetFromInfos(const std::vector<FileInfo>& infos);
     void determineOffsetFromBounds();

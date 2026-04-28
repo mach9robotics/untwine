@@ -26,16 +26,17 @@ namespace epf
 class Grid
 {
 public:
-    Grid(const pdal::BOX3D& bounds, uint64_t numPoints, int level, bool cubic) :
+    Grid(const pdal::BOX3D& bounds, uint64_t numPoints, int level, bool cubic,
+         double fillRatio = 1.0) :
         m_bounds(bounds)
     {
         if (level == -1)
-            level = calcLevel(numPoints, cubic);
+            level = calcLevel(numPoints, cubic, fillRatio);
         resetLevel(level);
     }
 
     VoxelKey key(double x, double y, double z) const;
-    int calcLevel(uint64_t numPoints, bool cubic) const;
+    int calcLevel(uint64_t numPoints, bool cubic, double fillRatio = 1.0) const;
     void resetLevel(int level);
     int maxLevel() const
         { return m_maxLevel; }
