@@ -16,6 +16,7 @@
 
 #include <pdal/util/FileUtils.hpp>
 
+#include "../untwine/FatalError.hpp"
 #include "../untwine/ProgressWriter.hpp"
 #include "../untwine/VoxelKey.hpp"
 
@@ -65,6 +66,20 @@ void PyramidManager::queueWithError(const OctantInfo& o, const std::string& erro
 }
 
 
+void PyramidManager::queueWithChunkIntegrityError(const OctantInfo& o,
+    const std::string& error)
+{
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+
+        m_queue.push(o);
+        m_error = error;
+        m_errorIsChunkIntegrity = true;
+    }
+    m_cv.notify_one();
+}
+
+
 void PyramidManager::run()
 {
     while (true)
@@ -81,8 +96,11 @@ void PyramidManager::run()
             {
                 // copy error before unlocking the mutex
                 const std::string error = m_error;
+                const bool chunkIntegrity = m_errorIsChunkIntegrity;
                 lock.unlock();
                 m_pool.join();
+                if (chunkIntegrity)
+                    throw ChunkIntegrityError(error);
                 throw FatalError(error);
             }
         }

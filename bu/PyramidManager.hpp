@@ -43,6 +43,10 @@ public:
     void setProgress(ProgressWriter *progress);
     void queue(const OctantInfo& o);
     void queueWithError(const OctantInfo& o, const std::string& error);
+    // Same as queueWithError but flags the error as a ChunkIntegrityError so
+    // the main thread rethrows the correct exception type (callers can
+    // distinguish retryable corruption from hard failure).
+    void queueWithChunkIntegrityError(const OctantInfo& o, const std::string& error);
     void run();
     void logOctant(const VoxelKey& k, int cnt, const IndexedStats& istats);
     uint64_t totalPoints() const
@@ -64,6 +68,7 @@ private:
     ProgressWriter *m_progress {nullptr};
     CopcSupport m_copc;
     std::string m_error;
+    bool m_errorIsChunkIntegrity {false};
     //
     std::unordered_map<VoxelKey, int> m_written;
     std::unordered_map<VoxelKey, int> m_childCounts;
