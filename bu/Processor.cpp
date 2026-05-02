@@ -13,6 +13,8 @@
 #include <numeric>
 #include <random>
 
+#include <pdal/util/FileUtils.hpp>
+
 #include "../untwine/GridKey.hpp"
 
 #include <pdal/PDALUtils.hpp>
@@ -101,6 +103,13 @@ void Processor::runLocal()
         sample(accepted, rejected);
 
     write(accepted, rejected);
+
+    // Delete consumed child bin files. Hoisted bins (moved to m_vi.octant() above)
+    // are not in the child lists, so they're safe from deletion here.
+    // On Linux, unlink while mmap'd is fine — data persists until ~PointAccessor unmaps.
+    for (int i = 0; i < 8; ++i)
+        for (const FileInfo& fi : m_vi[i].fileInfos())
+            pdal::FileUtils::deleteFile(m_b.opts.tempDir + "/" + fi.filename());
 }
 
 
