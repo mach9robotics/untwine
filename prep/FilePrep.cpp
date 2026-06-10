@@ -12,6 +12,8 @@
 
 #include "FilePrep.hpp"
 
+#include <algorithm>
+
 #include "untwine/Common.hpp"
 #include "untwine/FileInfo.hpp"
 
@@ -213,14 +215,18 @@ void FilePrep::filterDims(std::vector<FileInfo>& infos, StringList allowedDims)
         if (!pdal::Utils::contains(allowedDims, xyz))
             allowedDims.push_back(xyz);
 
-    // Remove dimensions not in the allowed list.
+    // Remove dimensions not in the allowed list. Use erase/remove_if rather than
+    // erasing inside a ++it loop: erase() returns the next iterator but the loop's
+    // own ++it would then skip the following element (and step past end() when the
+    // last element is erased), leaving disallowed dims behind.
     for (FileInfo& info : infos)
-        for (auto it = info.dimInfo.begin(); it != info.dimInfo.end(); ++it)
-        {
-            FileDimInfo& fdi = *it;
-            if (!pdal::Utils::contains(allowedDims, fdi.name))
-                it = info.dimInfo.erase(it);
-        }
+    {
+        DimInfoList& dims = info.dimInfo;
+        dims.erase(std::remove_if(dims.begin(), dims.end(),
+            [&allowedDims](const FileDimInfo& fdi)
+            { return !pdal::Utils::contains(allowedDims, fdi.name); }),
+            dims.end());
+    }
 }
 
 void FilePrep::determineDims(std::vector<FileInfo>& infos, pdal::PointLayout& layout)
