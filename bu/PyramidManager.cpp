@@ -29,7 +29,7 @@ namespace bu
 {
 
 PyramidManager::PyramidManager(const BaseInfo& b) : m_b(b), m_pool(10), m_totalPoints(0),
-    m_copc(m_b)
+    m_copc(m_b), m_chunkWriter(*this, m_b)
 {}
 
 PyramidManager::~PyramidManager()
@@ -92,6 +92,14 @@ void PyramidManager::run()
         process(o);
     }
 
+    // The chunk table, hierarchy and stats are only complete once every chunk
+    // has been compressed and written, so wait for the processors to finish
+    // enqueueing chunks (the root's processor may still be running) and then
+    // drain the chunk writer before finalizing the file. stop() throws if a
+    // chunk failed to compress or write.
+    m_pool.join();
+    m_chunkWriter.stop();
+
     createHierarchy();
 
     m_copc.writeChunkTable();
@@ -99,6 +107,13 @@ void PyramidManager::run()
     m_copc.updateHeader(m_stats);
     // The header is last because we don't have the evlr position until the end.
     m_copc.writeHeader();
+}
+
+// Hand an octant's points off to the chunk writer for compression and writing to
+// the output file. Called from Processor threads; blocks if the writer's queue is full.
+void PyramidManager::enqueueChunk(ChunkWriter::Chunk&& chunk)
+{
+    m_chunkWriter.enqueue(std::move(chunk));
 }
 
 // Take the item off the queue and stick it on the complete list. If we have all 8 octants,

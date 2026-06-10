@@ -17,6 +17,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include "ChunkWriter.hpp"
 #include "CopcSupport.hpp"
 #include "OctantInfo.hpp"
 #include "Stats.hpp"
@@ -44,6 +45,7 @@ public:
     void queue(const OctantInfo& o);
     void queueWithError(const OctantInfo& o, const std::string& error);
     void run();
+    void enqueueChunk(ChunkWriter::Chunk&& chunk);
     void logOctant(const VoxelKey& k, int cnt, const IndexedStats& istats);
     uint64_t totalPoints() const
         { return m_totalPoints; }
@@ -67,6 +69,9 @@ private:
     //
     std::unordered_map<VoxelKey, int> m_written;
     std::unordered_map<VoxelKey, int> m_childCounts;
+    // Declared last: its destructor joins the writer threads, which use the
+    // members above, so it must be destroyed before them.
+    ChunkWriter m_chunkWriter;
 
     void getInputFiles();
     void process(const OctantInfo& o);
