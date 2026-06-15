@@ -10,6 +10,7 @@
  *                                                                           *
  ****************************************************************************/
 
+#include <cstring>
 #include <numeric>
 #include <random>
 
@@ -348,6 +349,9 @@ Processor::writeOctantCompressed(const OctantInfo& o, Index& index, IndexIter po
 
     PointViewPtr view(new pdal::PointView(*table));
 
+    // Late materialization: row id of each point appended to the view, in view order.
+    std::vector<uint64_t> ids;
+
     // The octant's points can came from one or more FileInfo.  The points are sorted such
     // all the points that come from a single FileInfo are consecutive.
     auto fii = o.fileInfos().begin();
@@ -364,7 +368,7 @@ Processor::writeOctantCompressed(const OctantInfo& o, Index& index, IndexIter po
             if (pos == index.end() || *pos >= fii->start() + fii->numPoints())
             {
                 count += std::distance(begin, pos);
-                appendCompressed(view, dims, *fii, begin, pos);
+                appendCompressed(view, dims, *fii, begin, pos, ids);
                 if (pos == index.end())
                     break;
                 begin = pos;
@@ -388,18 +392,41 @@ flush:
     // parent octant's processing to proceed without waiting for the compression.
     // Stats accumulation and the logOctant call happen on the chunk writer thread
     // as well. May block if the chunk writer's queue is full.
-    m_manager.enqueueChunk({o.key(), table, view, extraDims, std::move(stats), count});
+    m_manager.enqueueChunk({o.key(), table, view, extraDims, std::move(stats), count,
+        std::move(ids)});
     return pos;
 }
 
 
 // Copy data from the source file to the point view.
 void Processor::appendCompressed(pdal::PointViewPtr view, const DimInfoList& dims,
-    const FileInfo& fi, IndexIter begin, IndexIter end)
+    const FileInfo& fi, IndexIter begin, IndexIter end, std::vector<uint64_t>& ids)
 {
     //ABELL - This could be improved by making a point table that handles a bunch
     //  of FileInfos/raw addresses. It would totally avoid the copy.
     pdal::PointId pointId = view->size();
+
+    // Late materialization: the record is just {xyz, rowId} - the per-dim loop below
+    // would read past it into the next point. Set xyz, remember the id; the chunk writer
+    // gathers the remaining dims from the attribute store.
+    if (m_b.opts.lateMaterialization)
+    {
+        using namespace pdal::Dimension;
+        for (IndexIter it = begin; it != end; ++it)
+        {
+            char *base = fi.address() + ((*it - fi.start()) * m_b.pointSize);
+            view->setField(Id::X, Type::Double, pointId, base);
+            view->setField(Id::Y, Type::Double, pointId, base + 8);
+            view->setField(Id::Z, Type::Double, pointId, base + 16);
+
+            uint64_t id;
+            memcpy(&id, base + SlimIdOffset, sizeof(id));
+            ids.push_back(id);
+            pointId++;
+        }
+        return;
+    }
+
     for (IndexIter it = begin; it != end; ++it)
     {
         char *base = fi.address() + ((*it - fi.start()) * m_b.pointSize);

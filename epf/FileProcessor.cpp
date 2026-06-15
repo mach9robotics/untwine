@@ -14,6 +14,10 @@
 #include "FileProcessor.hpp"
 #include "../untwine/ProgressWriter.hpp"
 
+#ifndef _WIN32
+#include <unistd.h>
+#endif
+
 #include <pdal/pdal_features.hpp>
 #include <pdal/StageFactory.hpp>
 #include <pdal/filters/StreamCallbackFilter.hpp>
@@ -49,9 +53,41 @@ void setDimensions(pdal::PointLayoutPtr layout, FileInfo& fi)
 
 
 FileProcessor::FileProcessor(const FileInfo& fi, size_t pointSize, const Grid& grid,
-        const Transform& xform, Writer *writer, ProgressWriter& progress) :
-    m_fi(fi), m_cellMgr(pointSize, writer), m_grid(grid), m_xform(xform), m_progress(progress)
-{}
+        const Transform& xform, Writer *writer, ProgressWriter& progress, int attrFd,
+        int attrRecordSize) :
+    m_fi(fi), m_cellMgr(pointSize, writer), m_grid(grid), m_xform(xform), m_progress(progress),
+    m_attrFd(attrFd), m_attrRecordSize(attrRecordSize)
+{
+    if (m_attrFd >= 0)
+    {
+        m_staging.resize(SlimIdOffset + m_attrRecordSize);
+        // Buffer ~2 MB of attribute records; ids within a FileProcessor are consecutive,
+        // so each flush is one contiguous write at a known offset.
+        size_t bufRecords = (std::max)((size_t)1, (size_t)(2 * 1024 * 1024) / m_attrRecordSize);
+        m_attrBufLimit = bufRecords * m_attrRecordSize;
+        m_attrBuf.reserve(m_attrBufLimit);
+    }
+}
+
+void FileProcessor::flushAttrStore()
+{
+#ifndef _WIN32
+    if (m_attrBuf.empty())
+        return;
+
+    uint64_t off = m_attrFirstId * (uint64_t)m_attrRecordSize;
+    size_t written = 0;
+    while (written < m_attrBuf.size())
+    {
+        ssize_t r = ::pwrite(m_attrFd, m_attrBuf.data() + written, m_attrBuf.size() - written,
+            (off_t)(off + written));
+        if (r <= 0)
+            throw FatalError("Failure writing to attribute store.");
+        written += r;
+    }
+    m_attrBuf.clear();
+#endif
+}
 
 class BasePointProcessor
 {
@@ -164,6 +200,50 @@ void FileProcessor::run()
         ptProcessor = std::make_unique<StdPointProcessor>(m_fi);
 
     pdal::StreamCallbackFilter f;
+    if (m_attrFd >= 0)
+    {
+        // Late materialization: decode the full point into the wide staging buffer, put
+        // {xyz, rowId} in the cell and buffer the attribute tail for the attribute store.
+        // Nothing in-progress ever lives in a cell buffer, so no flush-exclusion is needed.
+        f.setCallback([this, &count, &cell, ptProcessor = ptProcessor.get()](pdal::PointRef& point)
+            {
+                Point p(m_staging.data());
+                ptProcessor->fill(point, p);
+
+                // Quantize the point value to what will be stored in the output file
+                // so that we're sure that the WRITTEN point value is in the expected
+                // location in the grid.
+                p.quantize(m_xform);
+
+                VoxelKey cellIndex = m_grid.key(p.x(), p.y(), p.z());
+                if (cellIndex != cell->key())
+                    cell = m_cellMgr.get(cellIndex);
+
+                uint64_t id = m_fi.baseId + m_localRow++;
+                uint8_t *dst = cell->point().data();
+                memcpy(dst, m_staging.data(), SlimIdOffset);
+                memcpy(dst + SlimIdOffset, &id, sizeof(id));
+                cell->advance();
+
+                if (m_attrBuf.empty())
+                    m_attrFirstId = id;
+                m_attrBuf.insert(m_attrBuf.end(), m_staging.data() + SlimIdOffset,
+                    m_staging.data() + SlimIdOffset + m_attrRecordSize);
+                if (m_attrBuf.size() >= m_attrBufLimit)
+                    flushAttrStore();
+
+                count++;
+                if (count == ProgressWriter::ChunkSize)
+                {
+                    m_progress.update();
+                    count = 0;
+                }
+
+                return true;
+            }
+        );
+    }
+    else
     f.setCallback([this, &count, &cell, ptProcessor = ptProcessor.get()](pdal::PointRef& point)
         {
             // Write the data into the point buffer in the cell.  This is the *last*
@@ -215,6 +295,9 @@ void FileProcessor::run()
     {
         throw FatalError(err.what());
     }
+
+    // Late materialization: write any remaining attribute records.
+    flushAttrStore();
 
     // We normally call update for every CountIncrement points, but at the end, just
     // tell the progress writer the number that we've done since the last update.

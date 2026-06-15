@@ -19,6 +19,13 @@ namespace untwine
 // Number of cells into which points are put for each octree voxel.
 const int CellCount = 128;
 
+// Late materialization (UNTWINE_LATE_MAT=1): temp .bin files carry only {x, y, z, rowId}
+// and the remaining dimensions are written once, in input order, to an attribute store
+// file addressed by rowId * attrRecordSize.
+const int SlimPointSize = 32;       // 3 doubles (xyz) + uint64 row id
+const int SlimIdOffset = 24;        // byte offset of the row id within a slim record
+const std::string AttributeStoreFilename { "attributes.bin" };
+
 using PointCount = uint64_t;
 using StringList = std::vector<std::string>;
 
@@ -38,6 +45,7 @@ struct Options
     bool no_srs;
     bool metadata;
     bool dummy;
+    bool lateMaterialization {false};
 };
 
 template<typename T>
@@ -74,6 +82,9 @@ public:
     Options opts;
     pdal::BOX3D bounds;
     size_t pointSize {0};
+    // Late materialization only: size of one record in the attribute store
+    // (full point record minus the leading 24 bytes of xyz).
+    int attrRecordSize {0};
     std::string outputFile;
     DimInfoList dimInfo;
     pdal::SpatialReference srs;

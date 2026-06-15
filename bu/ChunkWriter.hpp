@@ -60,9 +60,13 @@ public:
         pdal::DimTypeList extraDims;
         IndexedStats stats;
         size_t count;
+        // Late materialization: row id of each view point (ids[i] belongs to view
+        // point i). Empty in standard mode, where the view already holds all dims.
+        std::vector<uint64_t> ids;
     };
 
     ChunkWriter(PyramidManager& manager, const BaseInfo& b);
+    ~ChunkWriter();
 
     // Blocks if the queue is full.
     void enqueue(Chunk&& chunk);
@@ -72,6 +76,8 @@ public:
 
 private:
     void write(Chunk& chunk);
+    void gather(Chunk& chunk);
+    void closeAttrStore();
     void createChunk(const Chunk& chunk);
     void sortChunk(pdal::PointViewPtr view);
     void fillPointBuf(pdal::PointRef& point, std::vector<char>& buf,
@@ -80,6 +86,9 @@ private:
     PyramidManager& m_manager;
     const BaseInfo& m_b;
     ThreadPool m_pool;
+    // Late materialization: read-only fd of the attribute store. pread doesn't touch
+    // the file offset, so one fd is shared by all worker threads.
+    int m_attrFd {-1};
 };
 
 } // namespace bu

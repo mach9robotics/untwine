@@ -39,10 +39,15 @@ public:
     void run(ProgressWriter& progress, std::vector<FileInfo>& fileInfos);
 
 private:
+    void closeAttrStore();
+
     BaseInfo& m_b;
     Grid m_grid;
     std::unique_ptr<Writer> m_writer;
     ThreadPool m_pool;
+    // Late materialization: fd of the attribute store file, written by the
+    // FileProcessors during binning. -1 when disabled.
+    int m_attrFd {-1};
 };
 
 } // namespace epf

@@ -12,6 +12,11 @@
 
 #include <iostream>
 
+#ifndef _WIN32
+#include <fcntl.h>
+#include <unistd.h>
+#endif
+
 #include "Epf.hpp"
 #include "EpfTypes.hpp"
 #include "FileProcessor.hpp"
@@ -36,7 +41,20 @@ Epf::Epf(BaseInfo& common) :
 {}
 
 Epf::~Epf()
-{}
+{
+    closeAttrStore();
+}
+
+void Epf::closeAttrStore()
+{
+#ifndef _WIN32
+    if (m_attrFd >= 0)
+    {
+        ::close(m_attrFd);
+        m_attrFd = -1;
+    }
+#endif
+}
 
 void Epf::run(ProgressWriter& progress, std::vector<FileInfo>& fileInfos)
 {
@@ -52,6 +70,20 @@ void Epf::run(ProgressWriter& progress, std::vector<FileInfo>& fileInfos)
     // Make a writer with NumWriters threads.
     m_writer.reset(new Writer(m_b.opts.tempDir, NumWriters, m_b.pointSize));
 
+#ifndef _WIN32
+    // Late materialization: create the attribute store, sized so that point i's
+    // attribute record lives at byte i * attrRecordSize. Each FileProcessor owns the
+    // disjoint id range [baseId, baseId + numPoints), so writes never overlap.
+    if (m_b.opts.lateMaterialization)
+    {
+        std::string attrPath = m_b.opts.tempDir + "/" + AttributeStoreFilename;
+        m_attrFd = ::open(attrPath.c_str(), O_CREAT | O_WRONLY | O_TRUNC, 0644);
+        if (m_attrFd < 0 ||
+            ::ftruncate(m_attrFd, (off_t)(m_b.numPoints * (uint64_t)m_b.attrRecordSize)) != 0)
+            throw FatalError("Can't create attribute store '" + attrPath + "'.");
+    }
+#endif
+
     progress.setPointIncrementer(m_b.numPoints, 40);
 
     // Add the files to the processing pool
@@ -60,13 +92,17 @@ void Epf::run(ProgressWriter& progress, std::vector<FileInfo>& fileInfos)
     {
         m_pool.add([&fi, &progress, pointSize = m_b.pointSize, xform = m_b.xform, this]()
         {
-            FileProcessor fp(fi, pointSize, m_grid, xform, m_writer.get(), progress);
+            FileProcessor fp(fi, pointSize, m_grid, xform, m_writer.get(), progress,
+                m_attrFd, m_b.attrRecordSize);
             fp.run();
         });
     }
 
     // Wait for  all the processors to finish and restart.
     m_pool.join();
+    // The attribute store is complete once the file processors are done; reprocessing
+    // only re-bins slim records.
+    closeAttrStore();
     // Tell the writer that it can exit. stop() will block until the writer threads
     // are finished.  stop() will throw if an error occurred during writing.
     m_writer->stop();
