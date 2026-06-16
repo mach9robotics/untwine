@@ -12,6 +12,7 @@
  ****************************************************************************/
 
 #include <algorithm>
+#include <cstdlib>
 #include <numeric>
 
 #ifndef _WIN32
@@ -36,8 +37,24 @@ namespace untwine
 namespace bu
 {
 
+namespace
+{
+// Read a positive int from an environment variable, falling back to def if the
+// variable is unset or not a positive integer. Used for profiling-sweep knobs.
+int envInt(const char *name, int def)
+{
+    const char *v = std::getenv(name);
+    if (!v)
+        return def;
+    int n = std::atoi(v);
+    return n > 0 ? n : def;
+}
+}
+
 ChunkWriter::ChunkWriter(PyramidManager& manager, const BaseInfo& b) :
-    m_manager(manager), m_b(b), m_pool(NumChunkWriters, ChunkWriterQueueSize)
+    m_manager(manager), m_b(b),
+    m_pool(envInt("UNTWINE_NUM_CHUNK_WRITERS", NumChunkWriters),
+           envInt("UNTWINE_CHUNK_QUEUE_SIZE", ChunkWriterQueueSize))
 {
     m_pool.trap(true, "Unknown error in ChunkWriter");
 
