@@ -117,32 +117,21 @@ void Processor::sample(Index& accepted, Index& rejected)
         }
     }
 
-    std::deque<int> index(totalPoints);
-    std::iota(index.begin(), index.end(), 0);
-
-    std::random_device rd;
-    std::mt19937 g(rd());
-    /**
-    std::vector<int32_t> v{1234};
-    std::seed_seq seed(v.begin(), v.end());
-    std::mt19937 g(seed);
-    **/
-
-    //ABELL - This may not be the best way to do this. Probably better to work from some
-    //  point (center, whatever) out, but this is cheap because you don't have to do
-    //  any computation with the point data. And I would think you should still get good
-    //  output, but it may be more sparse. Seems you could fix that by just choosing a
-    //  smaller radius.  Should be tested.
-    std::shuffle(index.begin(), index.end(), g);
-
-    while (index.size())
+    // Visit points in sequential (file) order: m_points concatenates the children's mmap'd
+    // .bin files, so in-order indexing makes reads sequential instead of the random major
+    // faults the old std::shuffle caused (the dominant BU I/O cost under memory pressure).
+    // Traversal order doesn't change the output: acceptable() only tests whether a cell is
+    // already occupied, so the first point to reach an empty cell keeps it and the rest are
+    // rejected. We care that each occupied cell holds one point, not which point it is. So the
+    // occupied cells, the counts, and the lossless output are identical for any order;
+    // randomizing buys nothing, and Morton wouldn't help (it can't make the reads sequential).
+    // https://onlinelibrary.wiley.com/doi/pdfdirect/10.1111/cgf.14134
+    for (int i = 0; i < totalPoints; ++i)
     {
-        int i = index.back();
-
         const Point& p = m_points[i];
         GridKey k = m_vi.gridKey(p);
 
-        // If we're accepting this point into this voxel from it's child, add it
+        // If we're accepting this point into this voxel from its child, add it
         // to the accepted list and also stick it in the grid.
         if (acceptable(i, k))
         {
@@ -151,8 +140,6 @@ void Processor::sample(Index& accepted, Index& rejected)
         }
         else
             rejected.push_back(i);
-
-        index.pop_back();
     }
 }
 

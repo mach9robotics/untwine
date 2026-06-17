@@ -38,6 +38,10 @@ struct Options
     bool no_srs;
     bool metadata;
     bool dummy;
+    // Experimental chunk-local in-RAM bottom-up build (see bu/ChunkBuilder).
+    bool chunkedBuild;
+    // Per-chunk point budget for the chunked build (0 = auto).
+    uint64_t maxChunkPoints;
 };
 
 template<typename T>

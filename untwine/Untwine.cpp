@@ -56,6 +56,10 @@ void addArgs(pdal::ProgramArgs& programArgs, Options& options, pdal::Arg * &temp
         options.metadata, false);
     programArgs.add("no_srs", "PDAL readers.las.nosrs passthrough.",
         options.no_srs, false);
+    programArgs.add("chunked_build", "Build the octree as independent in-RAM chunk subtrees "
+        "(experimental, faster bottom-up).", options.chunkedBuild, false);
+    programArgs.add("max_chunk_points", "Per-chunk point budget for --chunked_build (0 = auto).",
+        options.maxChunkPoints, (uint64_t)0);
 }
 
 bool handleOptions(pdal::StringList& arglist, Options& options)
