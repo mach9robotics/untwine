@@ -12,6 +12,7 @@
 
 
 #include "FileProcessor.hpp"
+#include "PointFill.hpp"
 #include "../untwine/ProgressWriter.hpp"
 
 #include <pdal/pdal_features.hpp>
@@ -23,109 +24,10 @@ namespace untwine
 namespace epf
 {
 
-namespace
-{
-
-// The dimension IDs need to come from the *source* layout because it's possible in the
-// case of user-defined dimensions that the IDs could vary for the same-named dimension
-// in different input files. The "dim" field represents the ID of the dimension
-// we're reading from. "offset" is the corresponding notion in the output packed point data.
-void setDimensions(pdal::PointLayoutPtr layout, FileInfo& fi)
-{
-    for (FileDimInfo& di : fi.dimInfo)
-    {
-        di.dim = layout->findDim(di.name);
-        assert(di.dim != pdal::Dimension::Id::Unknown);
-
-        // If we have a bit offset, then we're really writing to the classflags field in the
-        // output point. Fetch that offset and set it. We will probably do this several
-        // times (once for each bit), but the value should always be the same.
-        if (di.shift != -1)
-            fi.untwineBitsOffset = di.offset;
-    }
-}
-
-} // unnamed namespace
-
-
 FileProcessor::FileProcessor(const FileInfo& fi, size_t pointSize, const Grid& grid,
         const Transform& xform, Writer *writer, ProgressWriter& progress) :
     m_fi(fi), m_cellMgr(pointSize, writer), m_grid(grid), m_xform(xform), m_progress(progress)
 {}
-
-class BasePointProcessor
-{
-public:
-    BasePointProcessor(const FileInfo& fi) : m_fi(fi)
-    {}
-    virtual ~BasePointProcessor()
-    {}
-
-    virtual void fill(const pdal::PointRef& src, Point& dst) = 0;
-
-protected:
-    const FileInfo& m_fi;
-};
-using PointProcessorPtr = std::unique_ptr<BasePointProcessor>;
-
-// These processors could probably be improved performance-wise by breaking the dimensions
-// up into types in the ctor to avoid the conditionals in fill().
-// Could also make FileProcessor take these as a template type to avoid having fill() be
-// virtual.
-class StdPointProcessor : public BasePointProcessor
-{
-public:
-    using BasePointProcessor::BasePointProcessor;
-
-    void fill(const pdal::PointRef& src, Point& dst) override
-    {
-        uint8_t untwineBits = 0;
-        for (const FileDimInfo& fdi : m_fi.dimInfo)
-        {
-            if (fdi.shift == -1)
-                src.getField(reinterpret_cast<char *>(dst.data() + fdi.offset),
-                    fdi.dim, fdi.type);
-            else
-                untwineBits |= (src.getFieldAs<uint8_t>(fdi.dim) << fdi.shift);
-        }
-
-        // We pack all the bitfields into the "untwine bits" field.
-        if (m_fi.untwineBitsOffset > -1)
-            memcpy(dst.data() + m_fi.untwineBitsOffset, &untwineBits, 1);
-    }
-};
-
-class LegacyLasPointProcessor : public BasePointProcessor
-{
-public:
-    using BasePointProcessor::BasePointProcessor;
-
-    void fill(const pdal::PointRef& src, Point& dst) override
-    {
-        uint8_t untwineBits = 0;
-        for (const FileDimInfo& fdi : m_fi.dimInfo)
-        {
-            if (fdi.dim == pdal::Dimension::Id::Classification)
-            {
-                uint8_t classification = src.getFieldAs<uint8_t>(fdi.dim);
-                if (classification == 12)
-                    untwineBits |= 0x08;  // Set the overlap bit.
-                untwineBits |= (classification >> 5);
-                classification &= 0x1F;
-                memcpy(dst.data() + fdi.offset, &classification, 1);
-            }
-            else if (fdi.shift == -1)
-                src.getField(reinterpret_cast<char *>(dst.data() + fdi.offset),
-                    fdi.dim, fdi.type);
-            else
-                untwineBits |= (src.getFieldAs<uint8_t>(fdi.dim) << fdi.shift);
-        }
-
-        // We pack all the bitfields into the "untwine bits" field.
-        if (m_fi.untwineBitsOffset > -1)
-            memcpy(dst.data() + m_fi.untwineBitsOffset, &untwineBits, 1);
-    }
-};
 
 
 void FileProcessor::run()
@@ -157,11 +59,7 @@ void FileProcessor::run()
     // into which we can write data.
     Cell *cell = m_cellMgr.get(VoxelKey());
 
-    PointProcessorPtr ptProcessor;
-    if (m_fi.driver == "readers.las" && m_fi.fileVersion < 14)
-        ptProcessor = std::make_unique<LegacyLasPointProcessor>(m_fi);
-    else
-        ptProcessor = std::make_unique<StdPointProcessor>(m_fi);
+    PointProcessorPtr ptProcessor = makePointProcessor(m_fi);
 
     pdal::StreamCallbackFilter f;
     f.setCallback([this, &count, &cell, ptProcessor = ptProcessor.get()](pdal::PointRef& point)

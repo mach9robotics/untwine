@@ -42,6 +42,8 @@ struct Options
     bool chunkedBuild;
     // Per-chunk point budget for the chunked build (0 = auto).
     uint64_t maxChunkPoints;
+    // Experimental counting-sort front-end (see chunker/Chunker); replaces EPF binning.
+    bool chunker;
 };
 
 template<typename T>

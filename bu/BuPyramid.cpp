@@ -1,4 +1,5 @@
 #include <iomanip>
+#include <iostream>
 #include <regex>
 #include <set>
 #include <string>
@@ -34,6 +35,30 @@ void BuPyramid::run(ProgressWriter& progress)
 
     m_manager.setProgress(&progress);
 
+    // Chunker pipeline (Schutz 2020): Chunking already wrote one raw-point .bin per chunk
+    // (chunker::distribute). Now Indexing builds a local octree from each chunk in parallel, then
+    // Merging combines the chunk-root .bins into the single global octree.
+    if (m_b.opts.chunker)
+    {
+        // Indexing.
+        progress.setPercent(.6);
+        indexChunks(m_b, m_manager, m_allFiles, &progress);
+
+        // Merging: the temp dir now holds only chunk-root .bins; rescan so the merge treats them
+        // as leaves and the existing scheduler builds the global octree above them.
+        m_allFiles.clear();
+        getInputFiles();
+
+        size_t mergeCount = queueWork();
+        if (!mergeCount)
+            throw FatalError("No temporary files to process. I/O or directory list error?");
+        std::cerr << "[merging] nodes=" << mergeCount << "\n";
+        progress.setPercent(.9);
+        progress.setIncrement(.1 / mergeCount);
+        m_manager.run();
+        return;
+    }
+
     // Chunk-local build: process spatially-disjoint subtrees independently in RAM, emitting
     // their interior chunks, then let the normal scheduler build the small cap from the
     // resulting chunk-root .bins. (See bu/ChunkBuilder.)
@@ -62,11 +87,11 @@ void BuPyramid::run(ProgressWriter& progress)
         m_allFiles.clear();
         getInputFiles();
 
-        size_t capCount = queueWork();
-        if (!capCount)
+        size_t mergeCount = queueWork();
+        if (!mergeCount)
             throw FatalError("No temporary files to process. I/O or directory list error?");
         progress.setPercent(.9);
-        progress.setIncrement(.1 / capCount);
+        progress.setIncrement(.1 / mergeCount);
         m_manager.run();
         return;
     }

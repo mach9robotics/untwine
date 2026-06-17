@@ -12,6 +12,8 @@
 
 #pragma once
 
+#include <algorithm>
+
 #include "../untwine/Common.hpp"
 #include "../untwine/Point.hpp"
 
@@ -49,10 +51,28 @@ public:
 
     Point operator[](size_t offset)
     {
-        for (FileInfo *fi : m_fileInfos)
-            if (offset >= (size_t)fi->start() &&
-                offset < (size_t)fi->start() + fi->numPoints())
-                return Point(fi->address() + ((offset - fi->start()) * m_b.pointSize));
+        // Pick the file holding `offset`. The default per-node BU mmaps a node's <= 8 children,
+        // and the count-sort chunker mmaps a single .bin per chunk, so both stay on the fast
+        // linear scan. Only --chunked_build, which can group many EPF leaf voxels into one chunk,
+        // exceeds 16 files; there the start-sorted binary search below wins.
+        if (m_fileInfos.size() <= 16)
+        {
+            for (FileInfo *fi : m_fileInfos)
+                if (offset >= (size_t)fi->start() &&
+                    offset < (size_t)fi->start() + fi->numPoints())
+                    return Point(fi->address() + ((offset - fi->start()) * m_b.pointSize));
+            return Point();
+        }
+
+        // m_fileInfos is sorted by start() (read() assigns each a running-total start) and the
+        // ranges are contiguous, so the containing file is the last one starting <= offset.
+        auto it = std::upper_bound(m_fileInfos.begin(), m_fileInfos.end(), offset,
+            [](size_t off, const FileInfo *fi) { return off < (size_t)fi->start(); });
+        if (it == m_fileInfos.begin())
+            return Point();
+        FileInfo *fi = *(it - 1);
+        if (offset < (size_t)fi->start() + fi->numPoints())
+            return Point(fi->address() + ((offset - fi->start()) * m_b.pointSize));
         return Point();
     }
 
