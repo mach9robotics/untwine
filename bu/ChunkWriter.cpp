@@ -119,10 +119,12 @@ void ChunkWriter::createChunk(const Chunk& c)
 
     std::vector<char> buf(lazperf::baseCount(m_b.pointFormatId) + ebCount);
     lazperf::writer::chunk_compressor compressor(m_b.pointFormatId, ebCount);
+    // Resolve the packed-bits dimension once.
+    pdal::Dimension::Id bitsDim = layout->findDim(UntwineBitsDimName);
     for (PointId idx = 0; idx < c.view->size(); ++idx)
     {
         PointRef point(*c.view, idx);
-        fillPointBuf(point, buf, layout->findDim(UntwineBitsDimName), c.extraDims);
+        fillPointBuf(point, buf, bitsDim, c.extraDims);
         compressor.compress(buf.data());
     }
     std::vector<unsigned char> chunk = compressor.done();
