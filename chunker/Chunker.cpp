@@ -56,11 +56,12 @@ void Chunker::run(ProgressWriter& progress, std::vector<FileInfo>& fileInfos)
     uint64_t target = m_b.opts.maxChunkPoints ? m_b.opts.maxChunkPoints : DefaultMaxChunkPoints;
     ChunkLut lut = buildChunkLut(cellCounts, target);
 
-    std::cerr << "[chunking] count-level " << countLevel
-              << " | occupied cells " << cellCounts.size()
-              << " | counted points " << counted << " (input " << m_b.numPoints << ")"
-              << " | target " << target
-              << " | chunks " << lut.roots.size() << "\n";
+    if (m_b.opts.progressDebug)
+        std::cerr << "[chunking] count-level " << countLevel
+                  << " | occupied cells " << cellCounts.size()
+                  << " | counted points " << counted << " (input " << m_b.numPoints << ")"
+                  << " | target " << target
+                  << " | chunks " << lut.roots.size() << "\n";
 
     // Chunking step 2b, distribute: decode again and route each point through the LUT into its
     // chunk's .bin. The Indexing phase bu::indexChunks then builds a local octree from each.

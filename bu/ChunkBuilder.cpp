@@ -387,7 +387,8 @@ void indexChunks(const BaseInfo& b, PyramidManager& mgr,
         p.leaves.emplace(cf.first, cf.second);
         plans.push_back(std::move(p));
     }
-    std::cerr << "[indexing] chunks=" << plans.size() << "\n";
+    if (b.opts.progressDebug)
+        std::cerr << "[indexing] chunks=" << plans.size() << "\n";
     indexPlans(b, mgr, plans, progress);
 }
 

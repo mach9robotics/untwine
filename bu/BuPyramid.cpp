@@ -52,7 +52,8 @@ void BuPyramid::run(ProgressWriter& progress)
         size_t mergeCount = queueWork();
         if (!mergeCount)
             throw FatalError("No temporary files to process. I/O or directory list error?");
-        std::cerr << "[merging] nodes=" << mergeCount << "\n";
+        if (m_b.opts.progressDebug)
+            std::cerr << "[merging] nodes=" << mergeCount << "\n";
         progress.setPercent(.9);
         progress.setIncrement(.1 / mergeCount);
         m_manager.run();
