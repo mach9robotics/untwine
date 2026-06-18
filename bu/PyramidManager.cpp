@@ -28,8 +28,11 @@ namespace untwine
 namespace bu
 {
 
-PyramidManager::PyramidManager(const BaseInfo& b) : m_b(b), m_pool(10), m_totalPoints(0),
-    m_copc(m_b)
+PyramidManager::PyramidManager(const BaseInfo& b) : m_b(b),
+    // Processor (build) pool size, env-tunable (default 10) so the total BU thread budget
+    // (this pool + the ChunkWriter pool) can be A/B'd against the core count. See untwine::envOverride.
+    m_pool(envOverride("UNTWINE_BU_POOL_SIZE", 10)), m_totalPoints(0),
+    m_copc(m_b), m_chunkWriter(*this, m_b)
 {}
 
 PyramidManager::~PyramidManager()
@@ -83,6 +86,11 @@ void PyramidManager::run()
                 const std::string error = m_error;
                 lock.unlock();
                 m_pool.join();
+                // Explicitly stop the chunk writer here, while the state its workers touch
+                // (m_copc/m_stats/...) is still alive, instead of leaving it to drain a full
+                // queue during stack unwinding (which only works by member-destruction order).
+                // Swallow any writer error so it can't mask the original failure.
+                try { m_chunkWriter.stop(); } catch (...) {}
                 throw FatalError(error);
             }
         }
@@ -92,6 +100,11 @@ void PyramidManager::run()
         process(o);
     }
 
+    // Drain the chunk writer before finalizing the file. stop() throws if a worker errored. The
+    // chunk table, hierarchy, and stats are only complete once every enqueued chunk has been
+    // written and logged.
+    m_chunkWriter.stop();
+
     createHierarchy();
 
     m_copc.writeChunkTable();
@@ -99,6 +112,11 @@ void PyramidManager::run()
     m_copc.updateHeader(m_stats);
     // The header is last because we don't have the evlr position until the end.
     m_copc.writeHeader();
+}
+
+void PyramidManager::enqueueChunk(ChunkWriter::Chunk&& chunk)
+{
+    m_chunkWriter.enqueue(std::move(chunk));
 }
 
 // Take the item off the queue and stick it on the complete list. If we have all 8 octants,
@@ -172,7 +190,9 @@ uint64_t PyramidManager::newChunk(const VoxelKey& key, uint32_t size, uint32_t c
 
 void PyramidManager::logOctant(const VoxelKey& k, int cnt, const IndexedStats& istats)
 {
-    std::lock_guard<std::mutex> lock(m_mutex);
+    // Own mutex (not m_mutex): called by every ChunkWriter worker, so keeping it off the dispatch
+    // queue's lock avoids serializing the tree-walk dispatcher against compression completions.
+    std::lock_guard<std::mutex> lock(m_logMutex);
 
     for (auto is : istats)
     {

@@ -1,6 +1,5 @@
 /*****************************************************************************
- *   Copyright (c) 2020, Hobu, Inc. (info@hobu.co)                           *
- *   Modified by Kyle Kam (kylekam@mach9.io)                                 *
+ *   Copyright (c) 2026, Mach9 Robotics                                      *
  *                                                                           *
  *   All rights reserved.                                                    *
  *                                                                           *
@@ -22,14 +21,8 @@
 
 #include <pdal/PDALUtils.hpp>
 #include <pdal/StageFactory.hpp>
-#include <pdal/io/BufferReader.hpp>
-#include <pdal/filters/SortFilter.hpp>
 #include <pdal/util/Algorithm.hpp>
 #include <pdal/util/FileUtils.hpp>
-
-#include <lazperf/lazperf.hpp>
-#include <lazperf/writers.hpp>
-#include <lazperf/readers.hpp>
 
 #include "../untwine/Common.hpp"
 #include "../untwine/GridKey.hpp"
@@ -157,12 +150,9 @@ private:
     // and return the points promoted to k.
     std::vector<int> sampleStructure(const VoxelKey& k);
 
+    // Build a self-contained chunk for `indices` and hand it to the ChunkWriter for deferred
+    // compression and writing.
     void emit(const VoxelKey& key, const std::vector<int>& indices);
-    void createChunk(const VoxelKey& key, pdal::PointViewPtr view,
-        const pdal::DimTypeList& extraDims);
-    void fillPointBuf(pdal::PointRef& point, std::vector<char>& buf,
-        pdal::Dimension::Id bitsDim, const pdal::DimTypeList& extraDims);
-    void sortChunk(pdal::PointViewPtr view);
     void writeBin(const VoxelKey& key, const std::vector<int>& indices);
 
     const BaseInfo& m_b;
@@ -313,13 +303,16 @@ void ChunkBuilder::emit(const VoxelKey& key, const std::vector<int>& indices)
 {
     using namespace pdal;
 
-    PointTable table;
+    // Build a self-contained chunk: a shared PointTable plus a view of copied point data. The view
+    // owns its data, so compression and writing run on a ChunkWriter thread after this ChunkBuilder
+    // and its mmap'd point files are gone. Stats accumulation and logOctant happen there too.
+    auto table = std::make_shared<PointTable>();
     IndexedStats stats;
     DimTypeList extraDims;
     DimInfoList dims = m_b.dimInfo;
     for (FileDimInfo& fdi : dims)
     {
-        fdi.dim = table.layout()->registerOrAssignDim(fdi.name, fdi.type);
+        fdi.dim = table->layout()->registerOrAssignDim(fdi.name, fdi.type);
         if (m_b.opts.stats)
         {
             if (fdi.dim == Dimension::Id::Classification)
@@ -332,9 +325,9 @@ void ChunkBuilder::emit(const VoxelKey& key, const std::vector<int>& indices)
         if (fdi.extraDim)
             extraDims.push_back(DimType(fdi.dim, fdi.type));
     }
-    table.finalize();
+    table->finalize();
 
-    PointViewPtr view(new PointView(table));
+    PointViewPtr view(new PointView(*table));
     PointId pointId = 0;
     for (int idx : indices)
     {
@@ -345,153 +338,7 @@ void ChunkBuilder::emit(const VoxelKey& key, const std::vector<int>& indices)
         pointId++;
     }
 
-    if (m_b.opts.stats)
-    {
-        for (PointId id = 0; id < view->size(); ++id)
-            for (auto& sp : stats)
-                sp.second.insert(view->getFieldAs<double>(sp.first, id));
-    }
-
-    try
-    {
-        createChunk(key, view, extraDims);
-    }
-    catch (pdal_error& err)
-    {
-        throw FatalError(err.what());
-    }
-    m_mgr.logOctant(key, (int)indices.size(), stats);
-}
-
-void ChunkBuilder::createChunk(const VoxelKey& key, pdal::PointViewPtr view,
-    const pdal::DimTypeList& extraDims)
-{
-    using namespace pdal;
-
-    if (view->size() == 0)
-    {
-        m_mgr.newChunk(key, 0, 0);
-        return;
-    }
-
-    if (view->layout()->hasDim(Dimension::Id::GpsTime))
-        sortChunk(view);
-
-    PointLayoutPtr layout = view->layout();
-
-    int ebCount {0};
-    for (DimType dim : extraDims)
-        ebCount += layout->dimSize(dim.m_id);
-
-    std::vector<char> buf(lazperf::baseCount(m_b.pointFormatId) + ebCount);
-    lazperf::writer::chunk_compressor compressor(m_b.pointFormatId, ebCount);
-    for (PointId idx = 0; idx < view->size(); ++idx)
-    {
-        PointRef point(*view, idx);
-        fillPointBuf(point, buf, layout->findDim(UntwineBitsDimName), extraDims);
-        compressor.compress(buf.data());
-    }
-    std::vector<unsigned char> chunk = compressor.done();
-
-    uint64_t location = m_mgr.newChunk(key, chunk.size(), (uint32_t)view->size());
-
-    std::ofstream out(os::toNative(m_b.opts.outputName),
-        std::ios::out | std::ios::in | std::ios::binary);
-    out.seekp(std::ofstream::pos_type(location));
-    out.write(reinterpret_cast<const char *>(chunk.data()), chunk.size());
-    out.close();
-    if (!out)
-        throw FatalError("Failure writing to file '" + m_b.opts.outputName + "'.");
-}
-
-void ChunkBuilder::sortChunk(pdal::PointViewPtr view)
-{
-    pdal::BufferReader r;
-    r.addView(view);
-
-    pdal::SortFilter s;
-    s.setInput(r);
-    pdal::Options o;
-    o.add("dimension", "GpsTime");
-    s.setOptions(o);
-
-    s.prepare(view->table());
-    s.execute(view->table());
-}
-
-void ChunkBuilder::fillPointBuf(pdal::PointRef& point, std::vector<char>& buf,
-    pdal::Dimension::Id bitsDim, const pdal::DimTypeList& extraDims)
-{
-    using namespace pdal;
-
-    LeInserter ostream(buf.data(), buf.size());
-
-    bool hasTime = true;
-    bool hasColor = m_b.pointFormatId == 7 || m_b.pointFormatId == 8;
-    bool hasInfrared = m_b.pointFormatId == 8;
-
-    using namespace Dimension;
-
-    uint8_t returnNumber(1);
-    uint8_t numberOfReturns(1);
-    if (point.hasDim(Id::ReturnNumber))
-        returnNumber = point.getFieldAs<uint8_t>(Id::ReturnNumber);
-    if (point.hasDim(Id::NumberOfReturns))
-        numberOfReturns = point.getFieldAs<uint8_t>(Id::NumberOfReturns);
-
-    auto converter = [](double d, Dimension::Id dim) -> int32_t
-    {
-        int32_t i(0);
-
-        if (!Utils::numericCast(d, i))
-            throw FatalError("Unable to convert scaled value (" +
-                Utils::toString(d) + ") to "
-                "int32 for dimension '" + Dimension::name(dim) +
-                "' when writing LAS/LAZ file.");
-        return i;
-    };
-
-    double x = point.getFieldAs<double>(Id::X);
-    int32_t xi = converter((x - m_b.xform.offset.x) / m_b.xform.scale.x, Id::X);
-    double y = point.getFieldAs<double>(Id::Y);
-    int32_t yi = converter((y - m_b.xform.offset.y) / m_b.xform.scale.y, Id::Y);
-    double z = point.getFieldAs<double>(Id::Z);
-    int32_t zi = converter((z - m_b.xform.offset.z) / m_b.xform.scale.z, Id::Z);
-
-    ostream << xi << yi << zi;
-
-    ostream << point.getFieldAs<uint16_t>(Id::Intensity);
-    ostream << (uint8_t)(returnNumber | (numberOfReturns << 4));
-    ostream << point.getFieldAs<uint8_t>(bitsDim);
-    ostream << point.getFieldAs<uint8_t>(Id::Classification);
-
-    uint8_t userData = point.getFieldAs<uint8_t>(Id::UserData);
-    int16_t scanAngleRank =
-        static_cast<int16_t>(std::round(
-            point.getFieldAs<float>(Id::ScanAngleRank) / .006f));
-    ostream << userData << scanAngleRank;
-
-    ostream << point.getFieldAs<uint16_t>(Id::PointSourceId);
-
-    if (hasTime)
-        ostream << point.getFieldAs<double>(Id::GpsTime);
-
-    if (hasColor)
-    {
-        ostream << point.getFieldAs<uint16_t>(Id::Red);
-        ostream << point.getFieldAs<uint16_t>(Id::Green);
-        ostream << point.getFieldAs<uint16_t>(Id::Blue);
-    }
-
-    if (hasInfrared)
-        ostream << point.getFieldAs<uint16_t>(Id::Infrared);
-
-    Everything e;
-    for (auto& dim : extraDims)
-    {
-        point.getField((char *)&e, dim.m_id, dim.m_type);
-        Utils::insertDim(ostream, dim.m_type, e);
-    }
+    m_mgr.enqueueChunk({key, table, view, extraDims, std::move(stats), indices.size()});
 }
 
 void ChunkBuilder::writeBin(const VoxelKey& key, const std::vector<int>& indices)
