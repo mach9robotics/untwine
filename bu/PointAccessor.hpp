@@ -12,8 +12,6 @@
 
 #pragma once
 
-#include <algorithm>
-
 #include "../untwine/Common.hpp"
 #include "../untwine/Point.hpp"
 
@@ -69,14 +67,6 @@ public:
             return 0;
         else
             return m_fileInfos.back()->start() + m_fileInfos.back()->numPoints();
-    }
-
-    void dump()
-    {
-        std::cerr << "Accessor infos:\n";
-        for (FileInfo *fi : m_fileInfos)
-            std::cerr << fi->filename() << "/" << fi->start() << "/" << fi->numPoints() << "!\n";
-        std::cerr << "\n";
     }
 
 private:

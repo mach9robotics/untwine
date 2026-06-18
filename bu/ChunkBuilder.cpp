@@ -19,9 +19,6 @@
 #include <unordered_set>
 #include <vector>
 
-#include <pdal/PDALUtils.hpp>
-#include <pdal/StageFactory.hpp>
-#include <pdal/util/Algorithm.hpp>
 #include <pdal/util/FileUtils.hpp>
 
 #include "../untwine/Common.hpp"
@@ -30,6 +27,8 @@
 #include "../untwine/ProgressWriter.hpp"
 #include "../untwine/ThreadPool.hpp"
 #include "../untwine/VoxelKey.hpp"
+
+#include "../epf/EpfTypes.hpp"
 
 #include "ChunkBuilder.hpp"
 #include "ChunkPlan.hpp"
@@ -48,9 +47,9 @@ namespace bu
 namespace
 {
 
-// Leaf cutoff for the in-chunk octree, matching epf MaxPointsPerNode, plus a depth guard so
-// pathological coincident points can't recurse forever.
-constexpr size_t LeafPointBudget = 100000;
+// Leaf cutoff for the in-chunk octree, the same threshold as epf::MaxPointsPerNode, plus a depth
+// guard so pathological coincident points can't recurse forever.
+constexpr size_t LeafPointBudget = epf::MaxPointsPerNode;
 constexpr int MaxBuildLevel = 30;
 
 // Fallback worker-thread count when std::thread::hardware_concurrency() reports 0.
