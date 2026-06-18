@@ -30,6 +30,10 @@ namespace chunker
 // distribute re-reads the points and writes one raw-point .bin per chunk for the Indexing phase.
 // An alternative to EPF binning and the iterative Reprocessor. Gated behind --chunker so it A/B's
 // against EPF.
+//
+// Terminology: a "chunk" here is a Chunking-phase chunk. A spatially-disjoint subtree written as
+// one raw-point .bin, the unit the Indexing phase builds in parallel. This is distinct from a COPC
+// chunk (one octree node's LAZ-compressed block in the output); see bu/ChunkWriter.
 class Chunker
 {
 public:

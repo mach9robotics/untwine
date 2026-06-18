@@ -40,6 +40,11 @@ constexpr int ChunkWriterQueueSize = 16;
 
 // Compresses octant point data and writes it into the single COPC output file.
 //
+// Terminology: the "chunks" here are COPC chunks. One octree node's LAZ-compressed block, the unit
+// the COPC chunk table indexes. This is unrelated to a chunker/ Chunking-phase chunk (a spatial
+// subtree written as one .bin); see chunker/Chunker. @Kyle: we should probably just rename this 
+// to COPCWriter in the future.
+//
 // A node's completion signal unblocks its parent, but the compressed output it produces is read
 // by nothing until the file is finalized. So rather than compress and write on the build thread
 // (delaying the parent), builders enqueue their fully-built point views here and signal completion
