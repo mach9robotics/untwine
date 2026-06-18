@@ -26,6 +26,7 @@
 #include "../untwine/ProgressWriter.hpp"
 #include "../untwine/ThreadPool.hpp"
 #include "pointio/Grid.hpp"
+#include "pointio/Reader.hpp"
 
 namespace untwine
 {
@@ -42,21 +43,8 @@ std::unordered_map<VoxelKey, uint64_t> countFile(const FileInfo& fi, const epf::
 {
     using namespace pdal;
 
-    pdal::Options opts;
-    opts.add("filename", fi.filename);
-    opts.add("count", fi.numPoints);
-    if (fi.driver == "readers.las")
-    {
-        opts.add("nosrs", fi.no_srs);
-        opts.add("use_eb_vlr", "true");
-#ifdef PDAL_LAS_START
-        opts.add("start", fi.start);
-#endif
-    }
-
     StageFactory factory;
-    Stage *s = factory.createStage(fi.driver);
-    s->setOptions(opts);
+    Stage *s = epf::createReaderStage(factory, fi);
 
     std::unordered_map<VoxelKey, uint64_t> counts;
     PointCount count = 0;
