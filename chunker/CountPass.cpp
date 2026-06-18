@@ -25,7 +25,7 @@
 #include "../untwine/Point.hpp"
 #include "../untwine/ProgressWriter.hpp"
 #include "../untwine/ThreadPool.hpp"
-#include "../epf/Grid.hpp"
+#include "pointio/Grid.hpp"
 
 namespace untwine
 {

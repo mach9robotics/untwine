@@ -22,7 +22,7 @@
 #include "../untwine/Common.hpp"
 #include "../untwine/FileInfo.hpp"
 #include "../untwine/ProgressWriter.hpp"
-#include "../epf/Grid.hpp"
+#include "pointio/Grid.hpp"
 
 namespace untwine
 {

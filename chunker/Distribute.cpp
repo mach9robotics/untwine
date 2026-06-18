@@ -27,11 +27,11 @@
 #include "../untwine/ProgressWriter.hpp"
 #include "../untwine/ThreadPool.hpp"
 #include "../untwine/VoxelKey.hpp"
-#include "../epf/Cell.hpp"
-#include "../epf/EpfTypes.hpp"
-#include "../epf/Grid.hpp"
-#include "../epf/PointFill.hpp"
-#include "../epf/Writer.hpp"
+#include "pointio/Cell.hpp"
+#include "pointio/EpfTypes.hpp"
+#include "pointio/Grid.hpp"
+#include "pointio/PointFill.hpp"
+#include "pointio/Writer.hpp"
 
 namespace untwine
 {

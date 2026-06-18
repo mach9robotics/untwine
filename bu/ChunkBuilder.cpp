@@ -28,7 +28,7 @@
 #include "../untwine/ThreadPool.hpp"
 #include "../untwine/VoxelKey.hpp"
 
-#include "../epf/EpfTypes.hpp"
+#include "pointio/EpfTypes.hpp"
 
 #include "ChunkBuilder.hpp"
 #include "ChunkPlan.hpp"

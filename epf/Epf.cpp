@@ -13,10 +13,10 @@
 #include <iostream>
 
 #include "Epf.hpp"
-#include "EpfTypes.hpp"
+#include "pointio/EpfTypes.hpp"
 #include "FileProcessor.hpp"
 #include "Reprocessor.hpp"
-#include "Writer.hpp"
+#include "pointio/Writer.hpp"
 #include "../untwine/Common.hpp"
 
 namespace
