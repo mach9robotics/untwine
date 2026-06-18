@@ -1,6 +1,5 @@
 /*****************************************************************************
- *   Copyright (c) 2020, Hobu, Inc. (info@hobu.co)                           *
- *   Modified by Kyle Kam (kylekam@mach9.io)                                 *
+ *   Copyright (c) 2026, Mach9 Robotics                                      *
  *                                                                           *
  *   All rights reserved.                                                    *
  *                                                                           *
