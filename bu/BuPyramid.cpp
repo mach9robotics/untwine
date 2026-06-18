@@ -59,43 +59,6 @@ void BuPyramid::run(ProgressWriter& progress)
         return;
     }
 
-    // Chunk-local build: process spatially-disjoint subtrees independently in RAM, emitting
-    // their interior chunks, then let the normal scheduler build the small cap from the
-    // resulting chunk-root .bins. (See bu/ChunkBuilder.)
-    if (m_b.opts.chunkedBuild)
-    {
-        uint64_t total = 0;
-        for (const auto& af : m_allFiles)
-            total += af.second.numPoints();
-
-        uint64_t target = m_b.opts.maxChunkPoints;
-        if (target == 0)
-        {
-            // Aim for many independent chunks while keeping per-chunk work bounded.
-            // @Kyle: We should make this more robust in a later commit, maybe target as a function of concurrency limits?
-            target = total / 256;
-            if (target < 50000)
-                target = 50000;
-            if (target > 10000000)
-                target = 10000000;
-        }
-
-        progress.setPercent(.6);
-        runChunkedBuild(m_b, m_manager, m_allFiles, target, &progress);
-
-        // The temp dir now holds only chunk-root .bins; rescan so the cap treats them as leaves.
-        m_allFiles.clear();
-        getInputFiles();
-
-        size_t mergeCount = queueWork();
-        if (!mergeCount)
-            throw FatalError("No temporary files to process. I/O or directory list error?");
-        progress.setPercent(.9);
-        progress.setIncrement(.1 / mergeCount);
-        m_manager.run();
-        return;
-    }
-
     size_t count = queueWork();
     if (!count)
         throw FatalError("No temporary files to process. I/O or directory list error?");

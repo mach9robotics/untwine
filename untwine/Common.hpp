@@ -56,9 +56,7 @@ struct Options
     bool no_srs;
     bool metadata;
     bool dummy;
-    // Experimental chunk-local in-RAM bottom-up build (see bu/ChunkBuilder).
-    bool chunkedBuild;
-    // Per-chunk point budget for the chunked build (0 = auto).
+    // Per-chunk point budget for the chunker front-end (0 = auto).
     uint64_t maxChunkPoints;
     // Experimental counting-sort front-end (see chunker/Chunker); replaces EPF binning.
     bool chunker;
