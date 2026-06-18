@@ -19,9 +19,6 @@
 #include <unordered_set>
 #include <vector>
 
-#include <pdal/PDALUtils.hpp>
-#include <pdal/StageFactory.hpp>
-#include <pdal/util/Algorithm.hpp>
 #include <pdal/util/FileUtils.hpp>
 
 #include "../untwine/Common.hpp"
@@ -30,6 +27,8 @@
 #include "../untwine/ProgressWriter.hpp"
 #include "../untwine/ThreadPool.hpp"
 #include "../untwine/VoxelKey.hpp"
+
+#include "pointio/EpfTypes.hpp"
 
 #include "ChunkBuilder.hpp"
 #include "ChunkPlan.hpp"
@@ -48,9 +47,9 @@ namespace bu
 namespace
 {
 
-// Leaf cutoff for the in-chunk octree, matching epf MaxPointsPerNode, plus a depth guard so
-// pathological coincident points can't recurse forever.
-constexpr size_t LeafPointBudget = 100000;
+// Leaf cutoff for the in-chunk octree, the same threshold as epf::MaxPointsPerNode, plus a depth
+// guard so pathological coincident points can't recurse forever.
+constexpr size_t LeafPointBudget = epf::MaxPointsPerNode;
 constexpr int MaxBuildLevel = 30;
 
 // Fallback worker-thread count when std::thread::hardware_concurrency() reports 0.
@@ -62,53 +61,6 @@ struct ChunkPlan
     VoxelKey root;
     std::unordered_map<VoxelKey, FileInfo> leaves;
 };
-
-// Partition the leaves into adaptively-sized internal chunk roots.
-//
-// Build a per-key subtree point count, then descend from the global root and stop at the
-// shallowest key whose subtree holds <= target points. A stopping key that is itself a leaf is a
-// single-leaf chunk root, left on disk untouched for the merge and not returned here. Internal
-// stopping keys become ChunkPlans. The global root never stops, so chunk roots are at level >= 1
-// and the merge always has at least the root to process.
-std::vector<ChunkPlan> planChunks(const std::unordered_map<VoxelKey, FileInfo>& leaves,
-    uint64_t target)
-{
-    const VoxelKey root;
-
-    // Internal chunk roots from the leaf point counts, via the pure logic in ChunkPlan.
-    std::unordered_map<VoxelKey, uint64_t> counts;
-    counts.reserve(leaves.size());
-    for (const auto& p : leaves)
-        counts[p.first] = (uint64_t)p.second.numPoints();
-
-    std::unordered_map<VoxelKey, ChunkPlan> byRoot;
-    for (const VoxelKey& r : planChunkRoots(counts, target))
-        byRoot[r].root = r;
-
-    // Assign each leaf to its nearest internal-root ancestor, if any.
-    for (const auto& p : leaves)
-    {
-        VoxelKey k = p.first;
-        while (true)
-        {
-            auto bi = byRoot.find(k);
-            if (bi != byRoot.end())
-            {
-                bi->second.leaves.emplace(p.first, p.second);
-                break;
-            }
-            if (k == root)
-                break;
-            k = k.parent();
-        }
-    }
-
-    std::vector<ChunkPlan> plans;
-    plans.reserve(byRoot.size());
-    for (auto& bp : byRoot)
-        plans.push_back(std::move(bp.second));
-    return plans;
-}
 
 // Indexing: builds one chunk's local octree in RAM and emits a COPC chunk per node.
 class ChunkBuilder
@@ -362,8 +314,8 @@ void ChunkBuilder::writeBin(const VoxelKey& key, const std::vector<int>& indices
     pdal::FileUtils::renameFile(fullFilename, tmpFilename);
 }
 
-// Index a set of prepared chunk plans in parallel, one local octree per chunk. Shared tail of
-// both front-ends: runChunkedBuild's leaf-grouped plans and indexChunks's one-file plans.
+// Index a set of prepared chunk plans in parallel, one local octree per chunk. The tail of the
+// chunker indexing phase: indexChunks builds one plan per chunk .bin and calls this.
 void indexPlans(const BaseInfo& b, PyramidManager& mgr, std::vector<ChunkPlan>& plans,
     ProgressWriter* progress)
 {
@@ -419,22 +371,6 @@ void indexPlans(const BaseInfo& b, PyramidManager& mgr, std::vector<ChunkPlan>& 
 
 } // unnamed namespace
 
-void runChunkedBuild(const BaseInfo& b, PyramidManager& mgr,
-    const std::unordered_map<VoxelKey, FileInfo>& leaves,
-    uint64_t maxChunkPoints, ProgressWriter* progress)
-{
-    std::vector<ChunkPlan> plans = planChunks(leaves, maxChunkPoints);
-    {
-        uint64_t chunkLeaves = 0;
-        for (const ChunkPlan& p : plans)
-            chunkLeaves += p.leaves.size();
-        std::cerr << "[chunked-build] target=" << maxChunkPoints << " leaves=" << leaves.size()
-                  << " internal-chunk-roots=" << plans.size()
-                  << " leaves-consumed=" << chunkLeaves << "\n";
-    }
-    indexPlans(b, mgr, plans, progress);
-}
-
 void indexChunks(const BaseInfo& b, PyramidManager& mgr,
     const std::unordered_map<VoxelKey, FileInfo>& chunkFiles, ProgressWriter* progress)
 {
@@ -451,7 +387,8 @@ void indexChunks(const BaseInfo& b, PyramidManager& mgr,
         p.leaves.emplace(cf.first, cf.second);
         plans.push_back(std::move(p));
     }
-    std::cerr << "[indexing] chunks=" << plans.size() << "\n";
+    if (b.opts.progressDebug)
+        std::cerr << "[indexing] chunks=" << plans.size() << "\n";
     indexPlans(b, mgr, plans, progress);
 }
 

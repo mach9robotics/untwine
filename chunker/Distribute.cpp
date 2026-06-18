@@ -27,11 +27,12 @@
 #include "../untwine/ProgressWriter.hpp"
 #include "../untwine/ThreadPool.hpp"
 #include "../untwine/VoxelKey.hpp"
-#include "../epf/Cell.hpp"
-#include "../epf/EpfTypes.hpp"
-#include "../epf/Grid.hpp"
-#include "../epf/PointFill.hpp"
-#include "../epf/Writer.hpp"
+#include "pointio/Cell.hpp"
+#include "pointio/EpfTypes.hpp"
+#include "pointio/Grid.hpp"
+#include "pointio/PointFill.hpp"
+#include "pointio/Writer.hpp"
+#include "pointio/Reader.hpp"
 
 namespace untwine
 {
@@ -48,21 +49,8 @@ void distributeFile(FileInfo fi, size_t pointSize, const epf::Grid& grid, const 
 {
     using namespace pdal;
 
-    pdal::Options opts;
-    opts.add("filename", fi.filename);
-    opts.add("count", fi.numPoints);
-    if (fi.driver == "readers.las")
-    {
-        opts.add("nosrs", fi.no_srs);
-        opts.add("use_eb_vlr", "true");
-#ifdef PDAL_LAS_START
-        opts.add("start", fi.start);
-#endif
-    }
-
     StageFactory factory;
-    Stage *s = factory.createStage(fi.driver);
-    s->setOptions(opts);
+    Stage *s = epf::createReaderStage(factory, fi);
 
     epf::CellMgr cellMgr(pointSize, writer);
     PointCount count = 0;

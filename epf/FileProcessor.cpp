@@ -12,7 +12,8 @@
 
 
 #include "FileProcessor.hpp"
-#include "PointFill.hpp"
+#include "pointio/PointFill.hpp"
+#include "pointio/Reader.hpp"
 #include "../untwine/ProgressWriter.hpp"
 
 #include <pdal/pdal_features.hpp>
@@ -32,21 +33,8 @@ FileProcessor::FileProcessor(const FileInfo& fi, size_t pointSize, const Grid& g
 
 void FileProcessor::run()
 {
-    pdal::Options opts;
-    opts.add("filename", m_fi.filename);
-    opts.add("count", m_fi.numPoints);
-    if (m_fi.driver == "readers.las")
-    {
-        opts.add("nosrs", m_fi.no_srs);
-        opts.add("use_eb_vlr", "true");
-#ifdef PDAL_LAS_START
-        opts.add("start", m_fi.start);
-#endif
-    }
-
     pdal::StageFactory factory;
-    pdal::Stage *s = factory.createStage(m_fi.driver);
-    s->setOptions(opts);
+    pdal::Stage *s = createReaderStage(factory, m_fi);
 
     PointCount count = 0;
 

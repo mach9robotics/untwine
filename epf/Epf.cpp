@@ -13,10 +13,10 @@
 #include <iostream>
 
 #include "Epf.hpp"
-#include "EpfTypes.hpp"
+#include "pointio/EpfTypes.hpp"
 #include "FileProcessor.hpp"
 #include "Reprocessor.hpp"
-#include "Writer.hpp"
+#include "pointio/Writer.hpp"
 #include "../untwine/Common.hpp"
 
 namespace
@@ -78,15 +78,6 @@ void Epf::run(ProgressWriter& progress, std::vector<FileInfo>& fileInfos)
 
     m_pool.go();
     progress.setPercent(.4);
-
-    // The chunked build rebuilds each chunk's octree in RAM (bu/ChunkBuilder splits oversized
-    // voxels itself via buildHierarchy), so the iterative on-disk reprocess pass below is
-    // redundant. Skip straight to BU.
-    if (m_b.opts.chunkedBuild)
-    {
-        progress.setPercent(.6);
-        return;
-    }
 
     // Iteratively reprocess oversized voxels until all are under MaxPointsPerNode.
     // Each iteration subdivides oversized voxels into finer ones. The loop continues
