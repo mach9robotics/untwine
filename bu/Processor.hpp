@@ -54,7 +54,7 @@ private:
     void writeCompressedOutput(Index& index);
     IndexIter writeOctantCompressed(const OctantInfo& o, Index& index, IndexIter pos);
     void appendCompressed(pdal::PointViewPtr view, const DimInfoList& dims, const FileInfo& fi,
-        IndexIter begin, IndexIter end);
+        IndexIter begin, IndexIter end, std::vector<uint64_t>& ids);
 
     VoxelInfo m_vi;
     const BaseInfo& m_b;

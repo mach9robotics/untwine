@@ -31,6 +31,10 @@ struct ChunkLut;
 // and LUT to its chunk, and append its full packed record to that chunk's <chunkRoot>.bin via the
 // EPF buffered writer. Produces one raw-point .bin per chunk for bu::indexChunks to consume.
 //
+// When b.opts.lateMaterialization is set, the .bin records instead carry only {xyz, rowId}
+// (SlimPointSize bytes) and the remaining dimensions are written once, in input order, to a
+// single attribute store (AttributeStoreFilename) that bu::ChunkWriter gathers from at output.
+//
 // b:         shared pipeline state.
 // fileInfos: input files to decode. Reordered largest-first as a side effect.
 // grid:      the count grid, identical to the one the count pass used.

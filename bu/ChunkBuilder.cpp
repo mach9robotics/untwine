@@ -12,6 +12,7 @@
 
 #include <array>
 #include <cmath>
+#include <cstring>
 #include <fstream>
 #include <functional>
 #include <numeric>
@@ -280,6 +281,33 @@ void ChunkBuilder::emit(const VoxelKey& key, const std::vector<int>& indices)
     table->finalize();
 
     PointViewPtr view(new PointView(*table));
+
+    // Late materialization: the .bin record is just {xyz, rowId} - the per-dim loop below
+    // would read past it. Set xyz, remember the id; the chunk writer gathers the remaining
+    // dims from the attribute store.
+    if (m_b.opts.lateMaterialization)
+    {
+        using namespace Dimension;
+        std::vector<uint64_t> ids;
+        ids.reserve(indices.size());
+        PointId pointId = 0;
+        for (int idx : indices)
+        {
+            char *base = m_points[idx].cdata();
+            view->setField(Id::X, Type::Double, pointId, base);
+            view->setField(Id::Y, Type::Double, pointId, base + 8);
+            view->setField(Id::Z, Type::Double, pointId, base + 16);
+
+            uint64_t id;
+            std::memcpy(&id, base + SlimIdOffset, sizeof(id));
+            ids.push_back(id);
+            pointId++;
+        }
+        m_mgr.enqueueChunk({key, table, view, extraDims, std::move(stats), indices.size(),
+            std::move(ids)});
+        return;
+    }
+
     PointId pointId = 0;
     for (int idx : indices)
     {
@@ -290,7 +318,7 @@ void ChunkBuilder::emit(const VoxelKey& key, const std::vector<int>& indices)
         pointId++;
     }
 
-    m_mgr.enqueueChunk({key, table, view, extraDims, std::move(stats), indices.size()});
+    m_mgr.enqueueChunk({key, table, view, extraDims, std::move(stats), indices.size(), {}});
 }
 
 void ChunkBuilder::writeBin(const VoxelKey& key, const std::vector<int>& indices)

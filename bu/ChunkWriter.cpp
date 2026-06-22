@@ -10,7 +10,14 @@
  *                                                                           *
  ****************************************************************************/
 
+#include <algorithm>
 #include <fstream>
+#include <numeric>
+
+#ifndef _WIN32
+#include <fcntl.h>
+#include <unistd.h>
+#endif
 
 #include <pdal/PDALUtils.hpp>
 #include <pdal/io/BufferReader.hpp>
@@ -40,6 +47,34 @@ ChunkWriter::ChunkWriter(PyramidManager& manager, const BaseInfo& b) :
            envOverride("UNTWINE_CHUNK_QUEUE_SIZE", ChunkWriterQueueSize))
 {
     m_pool.trap(true, "Unknown error in ChunkWriter");
+
+#ifndef _WIN32
+    // Late materialization: the attribute store was fully written during the chunker distribute
+    // pass (BU is constructed after the front-end completes).
+    if (m_b.opts.lateMaterialization)
+    {
+        std::string attrPath = m_b.opts.tempDir + "/" + AttributeStoreFilename;
+        m_attrFd = ::open(attrPath.c_str(), O_RDONLY);
+        if (m_attrFd < 0)
+            throw FatalError("Can't open attribute store '" + attrPath + "'.");
+    }
+#endif
+}
+
+ChunkWriter::~ChunkWriter()
+{
+    closeAttrStore();
+}
+
+void ChunkWriter::closeAttrStore()
+{
+#ifndef _WIN32
+    if (m_attrFd >= 0)
+    {
+        ::close(m_attrFd);
+        m_attrFd = -1;
+    }
+#endif
 }
 
 void ChunkWriter::enqueue(Chunk&& chunk)
@@ -57,13 +92,82 @@ void ChunkWriter::stop()
 {
     // join() drains the queue; workers only exit once all queued chunks have been written.
     m_pool.join();
+    closeAttrStore();
     StringList errors = m_pool.clearErrors();
     if (errors.size())
         throw FatalError(errors.front());
 }
 
+// Late materialization: the view arrives holding only X/Y/Z; fill in every other dimension from
+// the attribute store. Must run before anything reads non-xyz dims: stats (write()), the GpsTime
+// sort and compression (createChunk()).
+void ChunkWriter::gather(Chunk& chunk)
+{
+#ifndef _WIN32
+    if (m_attrFd < 0 || chunk.view->size() == 0)
+        return;
+
+    const uint64_t W = (uint64_t)m_b.attrRecordSize;
+
+    // Visit view points in id order so reads of the input-ordered attribute store coalesce into
+    // sequential runs (a voxel's ids cluster - scan data is coherent).
+    std::vector<uint32_t> order(chunk.ids.size());
+    std::iota(order.begin(), order.end(), 0);
+    std::sort(order.begin(), order.end(),
+        [&ids = chunk.ids](uint32_t a, uint32_t b){ return ids[a] < ids[b]; });
+
+    // Resolve the non-xyz dims against this chunk's table layout. X/Y/Z occupy wide-record bytes
+    // [0, SlimIdOffset); every other dim's attribute-store offset is its wide offset minus that
+    // prefix.
+    struct GatherDim
+    {
+        pdal::Dimension::Id dim;
+        pdal::Dimension::Type type;
+        int offset;
+    };
+    std::vector<GatherDim> gdims;
+    for (const FileDimInfo& fdi : m_b.dimInfo)
+        if (fdi.offset >= SlimIdOffset)
+            gdims.push_back({chunk.view->layout()->findDim(fdi.name), fdi.type,
+                fdi.offset - SlimIdOffset});
+
+    std::vector<char> buf;
+    size_t i = 0;
+    while (i < order.size())
+    {
+        // Coalesce consecutive ids into one read.
+        size_t j = i + 1;
+        while (j < order.size() && chunk.ids[order[j]] == chunk.ids[order[j - 1]] + 1)
+            j++;
+
+        uint64_t firstId = chunk.ids[order[i]];
+        size_t want = (j - i) * W;
+        buf.resize(want);
+        size_t got = 0;
+        while (got < want)
+        {
+            ssize_t r = ::pread(m_attrFd, buf.data() + got, want - got,
+                (off_t)(firstId * W + got));
+            if (r <= 0)
+                throw FatalError("Failure reading attribute store.");
+            got += r;
+        }
+
+        for (size_t k = i; k < j; ++k)
+        {
+            char *src = buf.data() + (k - i) * W;
+            for (const GatherDim& gd : gdims)
+                chunk.view->setField(gd.dim, gd.type, order[k], src + gd.offset);
+        }
+        i = j;
+    }
+#endif
+}
+
 void ChunkWriter::write(Chunk& chunk)
 {
+    gather(chunk);
+
     // Stats are accumulated here, on the worker thread, rather than on the build thread.
     if (m_b.opts.stats)
     {

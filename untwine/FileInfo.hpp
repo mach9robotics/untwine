@@ -33,6 +33,9 @@ struct FileInfo
     DimInfoList dimInfo;
     uint64_t numPoints {0};
     uint64_t start {0};
+    // Late materialization: global row id of this FileInfo's first point (prefix sum of
+    // numPoints over the final FileInfo list). Ids are dense in [0, BaseInfo::numPoints).
+    uint64_t baseId {0};
     pdal::BOX3D bounds;
     pdal::SpatialReference srs;
     int untwineBitsOffset {-1};

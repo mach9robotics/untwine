@@ -12,6 +12,8 @@
 
 #include "FilePrep.hpp"
 
+#include <iostream>
+
 #include "untwine/Common.hpp"
 #include "untwine/FileInfo.hpp"
 
@@ -66,6 +68,17 @@ std::vector<FileInfo> FilePrep::run()
     // This is just a debug thing that will allow the number of input files to be limited.
     if (fileInfos.size() > m_b.opts.fileLimit)
         fileInfos.resize(m_b.opts.fileLimit);
+
+    // Late materialization: assign each FileInfo the global row id of its first point.
+    // Must run on the final (post-resize) list so that ids are dense in [0, total).
+    {
+        uint64_t baseId = 0;
+        for (FileInfo& fi : fileInfos)
+        {
+            fi.baseId = baseId;
+            baseId += fi.numPoints;
+        }
+    }
 
     // Fill in dim info.
     for (FileInfo& fi : fileInfos)
@@ -141,6 +154,29 @@ void FilePrep::fillMetadata(const pdal::PointLayout& layout)
         di.extraDim = isExtraDim(di.name);
         m_b.pointSize += pdal::Dimension::size(di.type);
         m_b.dimInfo.emplace_back(std::move(di));
+    }
+
+    // Late materialization: temp .bin files carry only {xyz, rowId}; the remaining
+    // dimensions live in the attribute store. m_b.dimInfo keeps the full wide layout
+    // (BU's point table, stats and the EB VLR are built from it); an attribute record
+    // is a wide record minus its leading 24 bytes of xyz, so a dim's attribute-store
+    // offset is (di.offset - SlimIdOffset).
+    if (m_b.opts.lateMaterialization)
+    {
+        bool xyzLeading = layout.dimOffset(Dimension::Id::X) == 0 &&
+            layout.dimOffset(Dimension::Id::Y) == 8 &&
+            layout.dimOffset(Dimension::Id::Z) == 16;
+        if (!xyzLeading || m_b.pointSize <= (size_t)SlimPointSize)
+        {
+            std::cerr << "UNTWINE_LATE_MAT: layout unsuitable (xyz not leading or point "
+                "record too small) - falling back to standard processing.\n";
+            m_b.opts.lateMaterialization = false;
+        }
+        else
+        {
+            m_b.attrRecordSize = (int)m_b.pointSize - SlimIdOffset;
+            m_b.pointSize = SlimPointSize;
+        }
     }
 }
 

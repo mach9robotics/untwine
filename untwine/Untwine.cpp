@@ -14,6 +14,7 @@
 #include <pdal/util/FileUtils.hpp>
 #include <pdal/util/ProgramArgs.hpp>
 
+#include <cstdlib>
 #include <regex>
 
 #include "Common.hpp"
@@ -104,6 +105,20 @@ bool handleOptions(pdal::StringList& arglist, Options& options)
         }
         options.stats = true;
 
+#ifndef _WIN32
+        // POSIX-only (the attribute store uses pwrite/pread). Late materialization is only
+        // implemented for the --chunker front-end; the default EPF path is unaffected.
+        const char *lateMat = std::getenv("UNTWINE_LATE_MAT");
+        if (lateMat && lateMat[0] == '1')
+        {
+            if (options.chunker)
+                options.lateMaterialization = true;
+            else
+                std::cerr << "UNTWINE_LATE_MAT=1 ignored: late materialization requires "
+                    "--chunker.\n";
+        }
+#endif
+
         if (options.progressFd == 1 && options.progressDebug)
         {
             std::cerr << "'--progress_fd' set to 1. Disabling '--progressDebug'.\n";
@@ -126,6 +141,7 @@ void cleanup(const std::string& dir, bool rmdir)
     for (const std::string& f : files)
         if (std::regex_match(f, sm, re))
             pdal::FileUtils::deleteFile(dir + "/" + f);
+    pdal::FileUtils::deleteFile(dir + "/" + AttributeStoreFilename);
     if (rmdir)
         pdal::FileUtils::deleteDirectory(dir);
 }
