@@ -138,6 +138,7 @@ void FilePrep::fillMetadata(const pdal::PointLayout& layout)
         di.name = layout.dimName(id);
         di.type = layout.dimType(id);
         di.offset = layout.dimOffset(id);
+        di.dim = id;     // canonical layout id, so BU/ChunkWriter doesn't need to re-register dims to get it
         di.extraDim = isExtraDim(di.name);
         m_b.pointSize += pdal::Dimension::size(di.type);
         m_b.dimInfo.emplace_back(std::move(di));
