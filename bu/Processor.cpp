@@ -11,20 +11,10 @@
  ****************************************************************************/
 
 #include <numeric>
-#include <random>
 
 #include "../untwine/GridKey.hpp"
 
-#include <pdal/PDALUtils.hpp>
-#include <pdal/StageFactory.hpp>
-#include <pdal/io/BufferReader.hpp>
-#include <pdal/filters/SortFilter.hpp>
-#include <pdal/util/Algorithm.hpp>
-
-#include <lazperf/lazperf.hpp>
-#include <lazperf/writers.hpp>
-#include <lazperf/readers.hpp>
-
+#include "ChunkWriter.hpp"
 #include "Processor.hpp"
 #include "PyramidManager.hpp"
 
@@ -117,32 +107,21 @@ void Processor::sample(Index& accepted, Index& rejected)
         }
     }
 
-    std::deque<int> index(totalPoints);
-    std::iota(index.begin(), index.end(), 0);
-
-    std::random_device rd;
-    std::mt19937 g(rd());
-    /**
-    std::vector<int32_t> v{1234};
-    std::seed_seq seed(v.begin(), v.end());
-    std::mt19937 g(seed);
-    **/
-
-    //ABELL - This may not be the best way to do this. Probably better to work from some
-    //  point (center, whatever) out, but this is cheap because you don't have to do
-    //  any computation with the point data. And I would think you should still get good
-    //  output, but it may be more sparse. Seems you could fix that by just choosing a
-    //  smaller radius.  Should be tested.
-    std::shuffle(index.begin(), index.end(), g);
-
-    while (index.size())
+    // Visit points in sequential (file) order: m_points concatenates the children's mmap'd
+    // .bin files, so in-order indexing makes reads sequential instead of the random major
+    // faults the old std::shuffle caused (the dominant BU I/O cost under memory pressure).
+    // Traversal order doesn't change the output: acceptable() only tests whether a cell is
+    // already occupied, so the first point to reach an empty cell keeps it and the rest are
+    // rejected. We care that each occupied cell holds one point, not which point it is. So the
+    // occupied cells, the counts, and the lossless output are identical for any order;
+    // randomizing buys nothing, and Morton wouldn't help (it can't make the reads sequential).
+    // https://onlinelibrary.wiley.com/doi/pdfdirect/10.1111/cgf.14134
+    for (int i = 0; i < totalPoints; ++i)
     {
-        int i = index.back();
-
         const Point& p = m_points[i];
         GridKey k = m_vi.gridKey(p);
 
-        // If we're accepting this point into this voxel from it's child, add it
+        // If we're accepting this point into this voxel from its child, add it
         // to the accepted list and also stick it in the grid.
         if (acceptable(i, k))
         {
@@ -151,8 +130,6 @@ void Processor::sample(Index& accepted, Index& rejected)
         }
         else
             rejected.push_back(i);
-
-        index.pop_back();
     }
 }
 
@@ -167,8 +144,8 @@ void Processor::write(Index& accepted, Index& rejected)
         writeOctantCompressed(m_vi.octant(), accepted, accepted.begin());
     }
     else
-        writeBinOutput(accepted);
-    writeCompressedOutput(rejected);
+        writeBinOutput(accepted); // writes temp .bin files 
+    writeCompressedOutput(rejected); // compresses
 }
 
 
@@ -321,8 +298,11 @@ Processor::writeOctantCompressed(const OctantInfo& o, Index& index, IndexIter po
     using namespace pdal;
 
     auto begin = pos;
-    PointTable table;
+    // The table is handed to the chunk writer along with the view (which refers to it),
+    // so it must outlive this function.
+    auto table = std::make_shared<PointTable>();
     IndexedStats stats;
+    DimTypeList extraDims;
 
     //ABELL - fixme
     // For now we copy the dimension list so we're sure that it matches the layout, though
@@ -330,10 +310,9 @@ Processor::writeOctantCompressed(const OctantInfo& o, Index& index, IndexIter po
     // layout.
 
     DimInfoList dims = m_b.dimInfo;
-    m_extraDims.clear();
     for (FileDimInfo& fdi : dims)
     {
-        fdi.dim = table.layout()->registerOrAssignDim(fdi.name, fdi.type);
+        fdi.dim = table->layout()->registerOrAssignDim(fdi.name, fdi.type);
         if (m_b.opts.stats)
         {
             // For single file output we need the counts by return number.
@@ -345,11 +324,11 @@ Processor::writeOctantCompressed(const OctantInfo& o, Index& index, IndexIter po
                 stats.push_back({fdi.dim, Stats(fdi.name, Stats::EnumType::NoEnum, false)});
         }
         if (fdi.extraDim)
-            m_extraDims.push_back(DimType(fdi.dim, fdi.type));
+            extraDims.push_back(DimType(fdi.dim, fdi.type));
     }
-    table.finalize();
+    table->finalize();
 
-    PointViewPtr view(new pdal::PointView(table));
+    PointViewPtr view(new pdal::PointView(*table));
 
     // The octant's points can came from one or more FileInfo.  The points are sorted such
     // all the points that come from a single FileInfo are consecutive.
@@ -385,15 +364,13 @@ Processor::writeOctantCompressed(const OctantInfo& o, Index& index, IndexIter po
         }
     }
 flush:
-    try
-    {
-        flushCompressed(view, o, stats);
-    }
-    catch (pdal_error& err)
-    {
-        throw FatalError(err.what());
-    }
-    m_manager.logOctant(o.key(), count, stats);
+    // The view holds copies of the point data, so compression and writing don't
+    // depend on this Processor's state (or the mapped files it owns) and can happen
+    // on a chunk writer thread. This Processor can then complete, which allows the
+    // parent octant's processing to proceed without waiting for the compression.
+    // Stats accumulation and the logOctant call happen on the chunk writer thread
+    // as well. May block if the chunk writer's queue is full.
+    m_manager.enqueueChunk({o.key(), table, view, extraDims, std::move(stats), count});
     return pos;
 }
 
@@ -412,159 +389,6 @@ void Processor::appendCompressed(pdal::PointViewPtr view, const DimInfoList& dim
             view->setField(fdi.dim, fdi.type, pointId,
                 reinterpret_cast<void *>(base + fdi.offset));
         pointId++;
-    }
-}
-
-void Processor::flushCompressed(pdal::PointViewPtr view, const OctantInfo& oi, IndexedStats& stats)
-{
-    // For single file output we need the stats for
-    if (m_b.opts.stats)
-    {
-        for (pdal::PointId id = 0; id < view->size(); ++id)
-        {
-            for (auto& sp : stats)
-            {
-                pdal::Dimension::Id dim = sp.first;
-                Stats& s = sp.second;
-                s.insert(view->getFieldAs<double>(dim, id));
-            }
-        }
-    }
-
-    createChunk(oi.key(), view);
-}
-
-
-void Processor::sortChunk(pdal::PointViewPtr view)
-{
-    pdal::BufferReader r;
-    r.addView(view);
-
-    pdal::SortFilter s;
-    s.setInput(r);
-    pdal::Options o;
-    o.add("dimension", "GpsTime");
-    s.setOptions(o);
-
-    s.prepare(view->table());
-    s.execute(view->table());
-}
-
-void Processor::createChunk(const VoxelKey& key, pdal::PointViewPtr view)
-{
-    using namespace pdal;
-
-    if (view->size() == 0)
-    {
-        m_manager.newChunk(key, 0, 0);
-        return;
-    }
-
-    // Sort the chunk on GPS time.
-    if (view->layout()->hasDim(Dimension::Id::GpsTime))
-        sortChunk(view);
-
-    PointLayoutPtr layout = view->layout();
-
-    int ebCount {0};
-    for (DimType dim : m_extraDims)
-        ebCount += layout->dimSize(dim.m_id);
-
-    std::vector<char> buf(lazperf::baseCount(m_b.pointFormatId) + ebCount);
-    lazperf::writer::chunk_compressor compressor(m_b.pointFormatId, ebCount);
-    for (PointId idx = 0; idx < view->size(); ++idx)
-    {
-        PointRef point(*view, idx);
-        fillPointBuf(point, buf, layout->findDim(UntwineBitsDimName));
-        compressor.compress(buf.data());
-    }
-    std::vector<unsigned char> chunk = compressor.done();
-
-    uint64_t location = m_manager.newChunk(key, chunk.size(), (uint32_t)view->size());
-
-    std::ofstream out(os::toNative(m_b.opts.outputName),
-        std::ios::out | std::ios::in | std::ios::binary);
-    out.seekp(std::ofstream::pos_type(location));
-    out.write(reinterpret_cast<const char *>(chunk.data()), chunk.size());
-    out.close();
-    if (!out)
-        throw FatalError("Failure writing to file '" + m_b.opts.outputName + "'.");
-}
-
-void Processor::fillPointBuf(pdal::PointRef& point, std::vector<char>& buf,
-    pdal::Dimension::Id bitsDim)
-{
-    using namespace pdal;
-
-    LeInserter ostream(buf.data(), buf.size());
-
-    bool hasTime = true; //  m_lasHeader.hasTime();
-    bool hasColor = m_b.pointFormatId == 7 || m_b.pointFormatId == 8;
-    bool hasInfrared = m_b.pointFormatId == 8;
-
-    // we always write the base fields
-    using namespace Dimension;
-
-    uint8_t returnNumber(1);
-    uint8_t numberOfReturns(1);
-    if (point.hasDim(Id::ReturnNumber))
-        returnNumber = point.getFieldAs<uint8_t>(Id::ReturnNumber);
-    if (point.hasDim(Id::NumberOfReturns))
-        numberOfReturns = point.getFieldAs<uint8_t>(Id::NumberOfReturns);
-
-    auto converter = [](double d, Dimension::Id dim) -> int32_t
-    {
-        int32_t i(0);
-
-        if (!Utils::numericCast(d, i))
-            throw FatalError("Unable to convert scaled value (" +
-                Utils::toString(d) + ") to "
-                "int32 for dimension '" + Dimension::name(dim) +
-                "' when writing LAS/LAZ file.");
-        return i;
-    };
-
-    double x = point.getFieldAs<double>(Id::X);
-    int32_t xi = converter((x - m_b.xform.offset.x) / m_b.xform.scale.x, Id::X);
-    double y = point.getFieldAs<double>(Id::Y);
-    int32_t yi = converter((y - m_b.xform.offset.y) / m_b.xform.scale.y, Id::Y);
-    double z = point.getFieldAs<double>(Id::Z);
-    int32_t zi = converter((z - m_b.xform.offset.z) / m_b.xform.scale.z, Id::Z);
-
-    ostream << xi << yi << zi;
-
-    ostream << point.getFieldAs<uint16_t>(Id::Intensity);
-    ostream << (uint8_t)(returnNumber | (numberOfReturns << 4));
-    ostream << point.getFieldAs<uint8_t>(bitsDim);
-    ostream << point.getFieldAs<uint8_t>(Id::Classification);
-
-    uint8_t userData = point.getFieldAs<uint8_t>(Id::UserData);
-     // Guaranteed to fit if scan angle rank isn't wonky.
-    int16_t scanAngleRank =
-        static_cast<int16_t>(std::round(
-            point.getFieldAs<float>(Id::ScanAngleRank) / .006f));
-    ostream << userData << scanAngleRank;
-
-    ostream << point.getFieldAs<uint16_t>(Id::PointSourceId);
-
-    if (hasTime)
-        ostream << point.getFieldAs<double>(Id::GpsTime);
-
-    if (hasColor)
-    {
-        ostream << point.getFieldAs<uint16_t>(Id::Red);
-        ostream << point.getFieldAs<uint16_t>(Id::Green);
-        ostream << point.getFieldAs<uint16_t>(Id::Blue);
-    }
-
-    if (hasInfrared)
-        ostream << point.getFieldAs<uint16_t>(Id::Infrared);
-
-    Everything e;
-    for (auto& dim : m_extraDims)
-    {
-        point.getField((char *)&e, dim.m_id, dim.m_type);
-        Utils::insertDim(ostream, dim.m_type, e);
     }
 }
 

@@ -49,6 +49,9 @@ public:
 
     Point operator[](size_t offset)
     {
+        // Pick the file holding `offset`. The default per-node BU mmaps a node's <= 8 children and
+        // the count-sort chunker mmaps a single .bin per chunk, so the file count is always small
+        // and a linear scan is fine.
         for (FileInfo *fi : m_fileInfos)
             if (offset >= (size_t)fi->start() &&
                 offset < (size_t)fi->start() + fi->numPoints())
@@ -64,14 +67,6 @@ public:
             return 0;
         else
             return m_fileInfos.back()->start() + m_fileInfos.back()->numPoints();
-    }
-
-    void dump()
-    {
-        std::cerr << "Accessor infos:\n";
-        for (FileInfo *fi : m_fileInfos)
-            std::cerr << fi->filename() << "/" << fi->start() << "/" << fi->numPoints() << "!\n";
-        std::cerr << "\n";
     }
 
 private:
