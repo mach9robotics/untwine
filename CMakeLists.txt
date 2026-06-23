@@ -31,6 +31,7 @@ file(GLOB SRCS CONFIGURE_DEPENDS
     pointio/*.cpp
     epf/*.cpp
     bu/*.cpp
+    chunker/*.cpp
 )
 
 # MINGW must come before WIN32 test
