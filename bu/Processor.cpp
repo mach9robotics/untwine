@@ -10,6 +10,7 @@
  *                                                                           *
  ****************************************************************************/
 
+#include <cstring>
 #include <numeric>
 
 #include "../untwine/GridKey.hpp"
@@ -298,21 +299,13 @@ Processor::writeOctantCompressed(const OctantInfo& o, Index& index, IndexIter po
     using namespace pdal;
 
     auto begin = pos;
-    // The table is handed to the chunk writer along with the view (which refers to it),
-    // so it must outlive this function.
-    auto table = std::make_shared<PointTable>();
     IndexedStats stats;
     DimTypeList extraDims;
 
-    //ABELL - fixme
-    // For now we copy the dimension list so we're sure that it matches the layout, though
-    // there's no reason why it should change. We should modify things to use a single
-    // layout.
-
-    DimInfoList dims = m_b.dimInfo;
-    for (FileDimInfo& fdi : dims)
+    // Stats are keyed by each dim's canonical id (set in prep/FilePrep::fillMetadata); the
+    // ChunkWriter reads them back by that same id -> offset, so no dim re-registration is needed.
+    for (const FileDimInfo& fdi : m_b.dimInfo)
     {
-        fdi.dim = table->layout()->registerOrAssignDim(fdi.name, fdi.type);
         if (m_b.opts.stats)
         {
             // For single file output we need the counts by return number.
@@ -326,27 +319,29 @@ Processor::writeOctantCompressed(const OctantInfo& o, Index& index, IndexIter po
         if (fdi.extraDim)
             extraDims.push_back(DimType(fdi.dim, fdi.type));
     }
-    table->finalize();
 
-    PointViewPtr view(new pdal::PointView(*table));
+    // Pre-size the packed-record buffer to hold every index entry from `pos` to the end of this
+    // octant's last FileInfo range. We then bulk-memcpy each point's record into it; the
+    // ChunkWriter reads fields back out by offset, with no PointView round-trip.
+    std::vector<char> records;
+    size_t count = 0;
 
     // The octant's points can came from one or more FileInfo.  The points are sorted such
     // all the points that come from a single FileInfo are consecutive.
     auto fii = o.fileInfos().begin();
     auto fiiEnd = o.fileInfos().end();
-    size_t count = 0;
 
     if (fii != fiiEnd)
     {
         // We're trying to find the range of points that come from a single FileInfo.
         // If pos is the end of the index of the the current file info, append the points
-        // to the view.  Otherwise, advance the position.
+        // to the records buffer.  Otherwise, advance the position.
         while (true)
         {
             if (pos == index.end() || *pos >= fii->start() + fii->numPoints())
             {
                 count += std::distance(begin, pos);
-                appendCompressed(view, dims, *fii, begin, pos);
+                appendCompressed(records, *fii, begin, pos);
                 if (pos == index.end())
                     break;
                 begin = pos;
@@ -364,31 +359,34 @@ Processor::writeOctantCompressed(const OctantInfo& o, Index& index, IndexIter po
         }
     }
 flush:
-    // The view holds copies of the point data, so compression and writing don't
+    // The records buffer holds copies of the point data, so compression and writing don't
     // depend on this Processor's state (or the mapped files it owns) and can happen
     // on a chunk writer thread. This Processor can then complete, which allows the
     // parent octant's processing to proceed without waiting for the compression.
     // Stats accumulation and the logOctant call happen on the chunk writer thread
     // as well. May block if the chunk writer's queue is full.
-    m_manager.enqueueChunk({o.key(), table, view, extraDims, std::move(stats), count});
+    m_manager.enqueueChunk(ChunkWriter::Chunk{o.key(), std::move(records), std::move(extraDims),
+        std::move(stats), count});
     return pos;
 }
 
 
-// Copy data from the source file to the point view.
-void Processor::appendCompressed(pdal::PointViewPtr view, const DimInfoList& dims,
-    const FileInfo& fi, IndexIter begin, IndexIter end)
+// Bulk-copy each point's packed record from the source file into the records buffer.
+void Processor::appendCompressed(std::vector<char>& records, const FileInfo& fi,
+    IndexIter begin, IndexIter end)
 {
-    //ABELL - This could be improved by making a point table that handles a bunch
-    //  of FileInfos/raw addresses. It would totally avoid the copy.
-    pdal::PointId pointId = view->size();
+    const size_t pointSize = m_b.pointSize;
+    // Grow once for the whole [begin, end) range, then memcpy each record into place. This avoids
+    // a per-point resize (capacity check + zero-fill) in BU's hot loop.
+    const size_t n = std::distance(begin, end);
+    const size_t off = records.size();
+    records.resize(off + n * pointSize);   // may reallocate, so take dst after resize
+    char* dst = records.data() + off;
     for (IndexIter it = begin; it != end; ++it)
     {
-        char *base = fi.address() + ((*it - fi.start()) * m_b.pointSize);
-        for (const FileDimInfo& fdi : dims)
-            view->setField(fdi.dim, fdi.type, pointId,
-                reinterpret_cast<void *>(base + fdi.offset));
-        pointId++;
+        const char* base = fi.address() + ((*it - fi.start()) * pointSize);
+        std::memcpy(dst, base, pointSize);
+        dst += pointSize;
     }
 }
 

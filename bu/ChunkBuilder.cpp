@@ -12,6 +12,7 @@
 
 #include <array>
 #include <cmath>
+#include <cstring>
 #include <fstream>
 #include <functional>
 #include <numeric>
@@ -255,16 +256,17 @@ void ChunkBuilder::emit(const VoxelKey& key, const std::vector<int>& indices)
 {
     using namespace pdal;
 
-    // Build a self-contained chunk: a shared PointTable plus a view of copied point data. The view
-    // owns its data, so compression and writing run on a ChunkWriter thread after this ChunkBuilder
-    // and its mmap'd point files are gone. Stats accumulation and logOctant happen there too.
-    auto table = std::make_shared<PointTable>();
+    // Build a self-contained chunk: the producer's own packed temp records, bulk-copied into a
+    // byte buffer the chunk owns. The buffer outlives this ChunkBuilder and its mmap'd point
+    // files, so compression and writing run on a ChunkWriter thread after they're gone. The
+    // ChunkWriter reads fields straight out of the packed bytes by offset, avoiding the per-field
+    // setField/getFieldAs round-trip through a PointView.
+    // Stats are keyed by each dim's canonical id (set in prep/FilePrep::fillMetadata); the
+    // ChunkWriter reads them back by that same id -> offset, so no dim re-registration is needed.
     IndexedStats stats;
     DimTypeList extraDims;
-    DimInfoList dims = m_b.dimInfo;
-    for (FileDimInfo& fdi : dims)
+    for (const FileDimInfo& fdi : m_b.dimInfo)
     {
-        fdi.dim = table->layout()->registerOrAssignDim(fdi.name, fdi.type);
         if (m_b.opts.stats)
         {
             if (fdi.dim == Dimension::Id::Classification)
@@ -277,20 +279,17 @@ void ChunkBuilder::emit(const VoxelKey& key, const std::vector<int>& indices)
         if (fdi.extraDim)
             extraDims.push_back(DimType(fdi.dim, fdi.type));
     }
-    table->finalize();
 
-    PointViewPtr view(new PointView(*table));
-    PointId pointId = 0;
+    std::vector<char> records(indices.size() * m_b.pointSize);
+    char* dst = records.data();
     for (int idx : indices)
     {
-        char *base = m_points[idx].cdata();
-        for (const FileDimInfo& fdi : dims)
-            view->setField(fdi.dim, fdi.type, pointId,
-                reinterpret_cast<void *>(base + fdi.offset));
-        pointId++;
+        std::memcpy(dst, m_points[idx].cdata(), m_b.pointSize);
+        dst += m_b.pointSize;
     }
 
-    m_mgr.enqueueChunk({key, table, view, extraDims, std::move(stats), indices.size()});
+    m_mgr.enqueueChunk(ChunkWriter::Chunk{key, std::move(records), std::move(extraDims),
+        std::move(stats), indices.size()});
 }
 
 void ChunkBuilder::writeBin(const VoxelKey& key, const std::vector<int>& indices)
