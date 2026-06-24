@@ -17,6 +17,7 @@
 #include <pdal/StageFactory.hpp>
 #include <pdal/pdal_features.hpp>
 
+#include "untwine/FatalError.hpp"
 #include "untwine/FileInfo.hpp"
 
 namespace untwine
@@ -45,6 +46,9 @@ inline pdal::Stage* createReaderStage(pdal::StageFactory& factory, const FileInf
     }
 
     pdal::Stage *s = factory.createStage(fi.driver);
+    if (!s)
+        throw FatalError("Couldn't create reader stage for driver '" + fi.driver +
+            "' on file '" + fi.filename + "'.");
     s->setOptions(opts);
     return s;
 }
