@@ -67,6 +67,8 @@ constexpr int ChunkWriterQueueSize = 16;
 class ChunkWriter
 {
 public:
+    // One built node's point data queued for compression + writing. A self-contained unit of work
+    // for a writer thread: it owns its bytes, so it outlives the producer and its mmap'd files.
     struct Chunk
     {
         VoxelKey key;
@@ -105,10 +107,16 @@ private:
             userData, scanAngleRank, pointSourceId, gpsTime, red, green, blue, infrared;
     };
 
+    // Worker-thread entry for one chunk: accumulate its per-dimension stats from the packed
+    // records, build and write the compressed block (createChunk), then log the node to the manager.
     void write(Chunk& chunk);
+    // Build the LAZ-compressed point block for `chunk` (extra-byte sizing, GPS-time sort), reserve
+    // its file location via PyramidManager::newChunk, and write it.
     void createChunk(const Chunk& chunk);
     // Resolve m_stdLocs from m_b.dimInfo. Run-invariant, so called once in the ctor.
     void resolveStdLocs();
+    // Emit one packed record `rec` into the LAZ point buffer `buf`: standard fields from `loc`,
+    // extra dimensions from `extraLocs`.
     void fillPointBuf(const char* rec, std::vector<char>& buf, const StdLocs& loc,
         const std::vector<FieldLoc>& extraLocs);
 
