@@ -55,6 +55,9 @@ inline void setDimensions(pdal::PointLayoutPtr layout, FileInfo& fi)
     }
 }
 
+// Abstract base for the per-file point serializers. A processor copies the dimensions named in its
+// FileInfo out of a source PDAL point into a packed output record, using the file's resolved
+// dim->offset layout. Subclasses differ only in how they pack the LAS classification bit fields.
 class BasePointProcessor
 {
 public:
@@ -63,6 +66,7 @@ public:
     virtual ~BasePointProcessor()
     {}
 
+    // Fill packed output record `dst` from source point `src`, per m_fi's dimension layout.
     virtual void fill(const pdal::PointRef& src, Point& dst) = 0;
 
 protected:
@@ -70,6 +74,8 @@ protected:
 };
 using PointProcessorPtr = std::unique_ptr<BasePointProcessor>;
 
+// Serializer for LAS 1.4+ and non-LAS files: copies each dimension through to its offset, OR-ing
+// any bit-field dimensions into the packed "untwine bits" byte.
 // These processors could probably be improved performance-wise by breaking the dimensions
 // up into types in the ctor to avoid the conditionals in fill().
 class StdPointProcessor : public BasePointProcessor
@@ -95,6 +101,8 @@ public:
     }
 };
 
+// Serializer for pre-1.4 LAS, where classification also carries the overlap flag (class 12) and
+// the high classification bits, which are split out into the packed "untwine bits" byte here.
 class LegacyLasPointProcessor : public BasePointProcessor
 {
 public:
