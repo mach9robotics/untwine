@@ -71,6 +71,8 @@ public:
         m_b(b), m_mgr(mgr), m_root(plan.root), m_leaves(std::move(plan.leaves)), m_points(b)
     {}
 
+    // Build this chunk's local octree and emit its nodes: load all points, decide the structure
+    // (phase 1), then sample bottom-up emitting a COPC chunk per node (phase 2).
     void run()
     {
         // Load the whole chunk's points into one flat index space.
@@ -95,6 +97,7 @@ private:
     // cells under LeafPointBudget into this node's octree leaves, and recurse into oversized cells.
     // Populates m_leafSet / m_leafPoints / m_occupied.
     void buildStructure(const VoxelKey& node, std::vector<int>&& indices);
+    // Record `node` as a finished leaf holding `indices`, and mark it and its ancestors occupied.
     void markLeaf(const VoxelKey& node, std::vector<int>&& indices);
     // The depth-`depth` descendant of `startKey`, whose bounds are `startBounds`, holding point p.
     VoxelKey cellOf(const Point& p, const VoxelKey& startKey, const pdal::BOX3D& startBounds,
@@ -106,6 +109,7 @@ private:
     // Build a self-contained chunk for `indices` and hand it to the ChunkWriter for deferred
     // compression and writing.
     void emit(const VoxelKey& key, const std::vector<int>& indices);
+    // Write the chunk root's promoted points to <root>.bin (the subsample the merge phase reads).
     void writeBin(const VoxelKey& key, const std::vector<int>& indices);
 
     const BaseInfo& m_b;
