@@ -1,5 +1,5 @@
 /*****************************************************************************
- *   Copyright (c) 2026, Mach9 Robotics                                      *
+ *   Copyright (c) 2020, Hobu, Inc. (info@hobu.co)                           *
  *                                                                           *
  *   All rights reserved.                                                    *
  *                                                                           *
