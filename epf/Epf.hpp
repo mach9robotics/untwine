@@ -15,7 +15,7 @@
 
 #include <vector>
 
-#include "Grid.hpp"
+#include "pointio/Grid.hpp"
 #include "untwine/ProgressWriter.hpp"
 #include "untwine/ThreadPool.hpp"
 

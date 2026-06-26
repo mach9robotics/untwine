@@ -12,8 +12,8 @@
 
 
 #include "untwine/FileInfo.hpp"
-#include "Grid.hpp"
-#include "Cell.hpp"
+#include "pointio/Grid.hpp"
+#include "pointio/Cell.hpp"
 
 namespace untwine
 {

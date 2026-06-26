@@ -20,14 +20,15 @@ set_package_properties(Threads PROPERTIES DESCRIPTION
 
 configure_file(untwine/Config.hpp.in include/Config.hpp)
 
-file(GLOB LAZPERF_SRCS
+file(GLOB LAZPERF_SRCS CONFIGURE_DEPENDS
     lazperf/*.cpp
     lazperf/detail/*.cpp
 )
 
-file(GLOB SRCS
+file(GLOB SRCS CONFIGURE_DEPENDS
     untwine/*.cpp
     prep/*.cpp
+    pointio/*.cpp
     epf/*.cpp
     bu/*.cpp
 )
