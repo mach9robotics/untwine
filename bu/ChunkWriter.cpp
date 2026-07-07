@@ -40,93 +40,40 @@ ChunkWriter::ChunkWriter(PyramidManager& manager, const BaseInfo& b) :
     // idle cores; on fast-storage boxes the build threads already saturate cores, so fewer writers
     // avoid oversubscribing. See untwine::envOverride.
     m_pool(envOverride("UNTWINE_NUM_CHUNK_WRITERS", NumChunkWriters),
-           envOverride("UNTWINE_CHUNK_QUEUE_SIZE", ChunkWriterQueueSize))
+           envOverride("UNTWINE_CHUNK_QUEUE_SIZE", ChunkWriterQueueSize)),
+    // Build the packed-record layout straight from m_b.dimInfo, whose canonical ids/offsets are set
+    // in prep/FilePrep::fillMetadata. Every packed-byte read below goes through the PackedPoint
+    // views this produces; the ctor validates the layout once (fields in-bounds, non-overlapping).
+    m_layout(m_b.dimInfo, m_b.pointSize)
 {
     m_pool.trap(true, "Unknown error in ChunkWriter");
-
-    // Build the id -> {offset, type} map for a packed temp record straight from m_b.dimInfo, whose
-    // canonical ids are set in prep/FilePrep::fillMetadata. The stats loop reads each stat dim by
-    // offset through this, and resolveStdLocs() builds m_stdLocs from it.
-    for (const FileDimInfo& fdi : m_b.dimInfo)
-        m_locById[fdi.dim] = FieldLoc{fdi.offset, fdi.type};
 
     resolveStdLocs();
 }
 
-// Resolve the standard fillPointBuf field locations from m_b.dimInfo. Run-invariant (depends only
-// on the layout, fixed for the whole job), so done once here rather than per chunk. Most come from
-// m_locById by id; the packed-bits field has a dynamically-assigned id, so it's matched by name.
+// Resolve the standard fillPointBuf field locations from m_layout. Run-invariant (depends only on
+// the layout, fixed for the whole job), so done once here rather than per chunk. Most resolve by
+// canonical id; the packed-bits field has a dynamically-assigned id, so it's matched by name.
 void ChunkWriter::resolveStdLocs()
 {
     using namespace pdal;
 
-    auto byId = [this](Dimension::Id id) -> FieldLoc
-    {
-        auto it = m_locById.find(id);
-        return it != m_locById.end() ? it->second : FieldLoc{};
-    };
-    m_stdLocs.x = byId(Dimension::Id::X);
-    m_stdLocs.y = byId(Dimension::Id::Y);
-    m_stdLocs.z = byId(Dimension::Id::Z);
-    m_stdLocs.intensity = byId(Dimension::Id::Intensity);
-    m_stdLocs.returnNumber = byId(Dimension::Id::ReturnNumber);
-    m_stdLocs.numberOfReturns = byId(Dimension::Id::NumberOfReturns);
-    m_stdLocs.classification = byId(Dimension::Id::Classification);
-    m_stdLocs.userData = byId(Dimension::Id::UserData);
-    m_stdLocs.scanAngleRank = byId(Dimension::Id::ScanAngleRank);
-    m_stdLocs.pointSourceId = byId(Dimension::Id::PointSourceId);
-    m_stdLocs.gpsTime = byId(Dimension::Id::GpsTime);
-    m_stdLocs.red = byId(Dimension::Id::Red);
-    m_stdLocs.green = byId(Dimension::Id::Green);
-    m_stdLocs.blue = byId(Dimension::Id::Blue);
-    m_stdLocs.infrared = byId(Dimension::Id::Infrared);
-    for (const FileDimInfo& fdi : m_b.dimInfo)
-        if (fdi.name == UntwineBitsDimName)
-            m_stdLocs.bits = FieldLoc{fdi.offset, fdi.type};
-}
-
-namespace
-{
-
-// Read sizeof(Src) bytes at p as Src, then numerically cast to T. memcpy (not a pointer cast)
-// handles unaligned offsets and avoids a strict-aliasing violation.
-template<typename Src, typename T>
-inline T readAs(const char* p)
-{
-    Src v;
-    std::memcpy(&v, p, sizeof(v));
-    return static_cast<T>(v);
-}
-
-} // unnamed namespace
-
-template<typename T>
-T ChunkWriter::readField(const char* rec, int offset, pdal::Dimension::Type stored)
-{
-    using Type = pdal::Dimension::Type;
-
-    // Absent dimension: mirror PDAL's getFieldAs on a missing dim, which yields a zero value.
-    if (offset < 0)
-        return T{};
-
-    // The stored type is only known at runtime, and converting its bytes to T is a numeric cast
-    // (not a reinterpret), so we must dispatch on it. This is getFieldAs<T> minus the layout lookup.
-    const char* p = rec + offset;
-    switch (stored)
-    {
-    case Type::Unsigned8:  return readAs<uint8_t,  T>(p);
-    case Type::Unsigned16: return readAs<uint16_t, T>(p);
-    case Type::Unsigned32: return readAs<uint32_t, T>(p);
-    case Type::Unsigned64: return readAs<uint64_t, T>(p);
-    case Type::Signed8:    return readAs<int8_t,   T>(p);
-    case Type::Signed16:   return readAs<int16_t,  T>(p);
-    case Type::Signed32:   return readAs<int32_t,  T>(p);
-    case Type::Signed64:   return readAs<int64_t,  T>(p);
-    case Type::Float:      return readAs<float,    T>(p);
-    case Type::Double:     return readAs<double,   T>(p);
-    case Type::None:       return T{};
-    }
-    return T{};
+    m_stdLocs.x = m_layout.field(Dimension::Id::X);
+    m_stdLocs.y = m_layout.field(Dimension::Id::Y);
+    m_stdLocs.z = m_layout.field(Dimension::Id::Z);
+    m_stdLocs.intensity = m_layout.field(Dimension::Id::Intensity);
+    m_stdLocs.returnNumber = m_layout.field(Dimension::Id::ReturnNumber);
+    m_stdLocs.numberOfReturns = m_layout.field(Dimension::Id::NumberOfReturns);
+    m_stdLocs.classification = m_layout.field(Dimension::Id::Classification);
+    m_stdLocs.userData = m_layout.field(Dimension::Id::UserData);
+    m_stdLocs.scanAngleRank = m_layout.field(Dimension::Id::ScanAngleRank);
+    m_stdLocs.pointSourceId = m_layout.field(Dimension::Id::PointSourceId);
+    m_stdLocs.gpsTime = m_layout.field(Dimension::Id::GpsTime);
+    m_stdLocs.red = m_layout.field(Dimension::Id::Red);
+    m_stdLocs.green = m_layout.field(Dimension::Id::Green);
+    m_stdLocs.blue = m_layout.field(Dimension::Id::Blue);
+    m_stdLocs.infrared = m_layout.field(Dimension::Id::Infrared);
+    m_stdLocs.bits = m_layout.field(UntwineBitsDimName);
 }
 
 void ChunkWriter::enqueue(Chunk&& chunk)
@@ -152,24 +99,20 @@ void ChunkWriter::stop()
 void ChunkWriter::write(Chunk& chunk)
 {
     // Stats are accumulated here, on the worker thread, rather than on the build thread. Each
-    // (id, Stats) pair keys on the same id the producer registered, so we look up that id's byte
-    // offset/type in m_locById and read the value straight from the packed record.
+    // (id, Stats) pair keys on the same id the producer registered, so we resolve that id's Field
+    // once and read the value straight from each packed record.
     if (m_b.opts.stats)
     {
-        const size_t pointSize = m_b.pointSize;
+        const char* base = chunk.records.data();
         for (auto& sp : chunk.stats)
         {
             pdal::Dimension::Id dim = sp.first;
             Stats& s = sp.second;
-            auto it = m_locById.find(dim);
-            if (it == m_locById.end() || it->second.offset < 0)
+            Field loc = m_layout.field(dim);
+            if (!loc.present())
                 continue;
-            const FieldLoc& loc = it->second;
             for (size_t i = 0; i < chunk.count; ++i)
-            {
-                const char* rec = chunk.records.data() + i * pointSize;
-                s.insert(readField<double>(rec, loc.offset, loc.type));
-            }
+                s.insert(m_layout.point(base, i).get<double>(loc));
         }
     }
 
@@ -187,20 +130,22 @@ void ChunkWriter::createChunk(const Chunk& c)
         return;
     }
 
-    const size_t pointSize = m_b.pointSize;
+    const char* base = c.records.data();
 
-    // Extra-byte size from the dim types directly; no PointLayout needed.
+    // Extra-byte size from the dim types directly; no PointLayout needed. Each extra dim's Field
+    // (offset + stored type) comes from the layout; the LAZ extra-byte layout uses dim.m_type,
+    // which matches the stored type.
     int ebCount {0};
-    std::vector<FieldLoc> extraLocs;
+    std::vector<Field> extraLocs;
     extraLocs.reserve(c.extraDims.size());
     for (const DimType& dim : c.extraDims)
     {
         ebCount += (int)Dimension::size(dim.m_type);
-        auto it = m_locById.find(dim.m_id);
-        // The packed record stores the extra dim with its own offset/type. Use the stored type
-        // from the record for the read; the LAZ extra-byte layout uses dim.m_type (they match).
-        int offset = (it != m_locById.end()) ? it->second.offset : -1;
-        extraLocs.push_back(FieldLoc{offset, dim.m_type});
+        // Offset from the layout; type pinned to dim.m_type (the LAZ extra-byte type, == the stored
+        // type), so an absent extra dim still emits Dimension::size(dim.m_type) zero bytes.
+        Field eloc = m_layout.field(dim.m_id);
+        eloc.type = dim.m_type;
+        extraLocs.push_back(eloc);
     }
 
     // Sort on GPS time, replacing the old PDAL SortFilter. We compute a stable ascending order of
@@ -208,17 +153,15 @@ void ChunkWriter::createChunk(const Chunk& c)
     // there's no GpsTime dimension, emit in natural order.
     std::vector<uint32_t> order(c.count);
     std::iota(order.begin(), order.end(), 0u);
-    if (m_stdLocs.gpsTime.offset >= 0)
+    if (m_stdLocs.gpsTime.present())
     {
-        const char* base = c.records.data();
-        const int gpsOff = m_stdLocs.gpsTime.offset;
+        const Field gps = m_stdLocs.gpsTime;
+        const RecordLayout& layout = m_layout;
         std::stable_sort(order.begin(), order.end(),
-            [base, pointSize, gpsOff](uint32_t a, uint32_t b)
+            [base, gps, &layout](uint32_t a, uint32_t b)
             {
-                double ta, tb;
-                std::memcpy(&ta, base + a * pointSize + gpsOff, sizeof(double));
-                std::memcpy(&tb, base + b * pointSize + gpsOff, sizeof(double));
-                return ta < tb;
+                return layout.point(base, a).get<double>(gps) <
+                    layout.point(base, b).get<double>(gps);
             });
     }
 
@@ -226,8 +169,7 @@ void ChunkWriter::createChunk(const Chunk& c)
     lazperf::writer::chunk_compressor compressor(m_b.pointFormatId, ebCount);
     for (uint32_t idx : order)
     {
-        const char* rec = c.records.data() + (size_t)idx * pointSize;
-        fillPointBuf(rec, buf, m_stdLocs, extraLocs);
+        fillPointBuf(m_layout.point(base, idx), buf, m_stdLocs, extraLocs);
         compressor.compress(buf.data());
     }
     std::vector<unsigned char> chunk = compressor.done();
@@ -243,8 +185,8 @@ void ChunkWriter::createChunk(const Chunk& c)
         throw FatalError("Failure writing to file '" + m_b.opts.outputName + "'.");
 }
 
-void ChunkWriter::fillPointBuf(const char* rec, std::vector<char>& buf, const StdLocs& loc,
-    const std::vector<FieldLoc>& extraLocs)
+void ChunkWriter::fillPointBuf(const PackedPoint& pt, std::vector<char>& buf, const StdLocs& loc,
+    const std::vector<Field>& extraLocs)
 {
     using namespace pdal;
 
@@ -256,11 +198,10 @@ void ChunkWriter::fillPointBuf(const char* rec, std::vector<char>& buf, const St
 
     uint8_t returnNumber(1);
     uint8_t numberOfReturns(1);
-    if (loc.returnNumber.offset >= 0)
-        returnNumber = readField<uint8_t>(rec, loc.returnNumber.offset, loc.returnNumber.type);
-    if (loc.numberOfReturns.offset >= 0)
-        numberOfReturns =
-            readField<uint8_t>(rec, loc.numberOfReturns.offset, loc.numberOfReturns.type);
+    if (loc.returnNumber.present())
+        returnNumber = pt.get<uint8_t>(loc.returnNumber);
+    if (loc.numberOfReturns.present())
+        numberOfReturns = pt.get<uint8_t>(loc.numberOfReturns);
 
     auto converter = [](double d, Dimension::Id dim) -> int32_t
     {
@@ -274,47 +215,45 @@ void ChunkWriter::fillPointBuf(const char* rec, std::vector<char>& buf, const St
         return i;
     };
 
-    double x = readField<double>(rec, loc.x.offset, loc.x.type);
+    double x = pt.get<double>(loc.x);
     int32_t xi = converter((x - m_b.xform.offset.x) / m_b.xform.scale.x, Dimension::Id::X);
-    double y = readField<double>(rec, loc.y.offset, loc.y.type);
+    double y = pt.get<double>(loc.y);
     int32_t yi = converter((y - m_b.xform.offset.y) / m_b.xform.scale.y, Dimension::Id::Y);
-    double z = readField<double>(rec, loc.z.offset, loc.z.type);
+    double z = pt.get<double>(loc.z);
     int32_t zi = converter((z - m_b.xform.offset.z) / m_b.xform.scale.z, Dimension::Id::Z);
 
     ostream << xi << yi << zi;
 
-    ostream << readField<uint16_t>(rec, loc.intensity.offset, loc.intensity.type);
+    ostream << pt.get<uint16_t>(loc.intensity);
     ostream << (uint8_t)(returnNumber | (numberOfReturns << 4));
-    ostream << readField<uint8_t>(rec, loc.bits.offset, loc.bits.type);
-    ostream << readField<uint8_t>(rec, loc.classification.offset, loc.classification.type);
+    ostream << pt.get<uint8_t>(loc.bits);
+    ostream << pt.get<uint8_t>(loc.classification);
 
-    uint8_t userData = readField<uint8_t>(rec, loc.userData.offset, loc.userData.type);
+    uint8_t userData = pt.get<uint8_t>(loc.userData);
     int16_t scanAngleRank =
-        static_cast<int16_t>(std::round(
-            readField<float>(rec, loc.scanAngleRank.offset, loc.scanAngleRank.type) / .006f));
+        static_cast<int16_t>(std::round(pt.get<float>(loc.scanAngleRank) / .006f));
     ostream << userData << scanAngleRank;
 
-    ostream << readField<uint16_t>(rec, loc.pointSourceId.offset, loc.pointSourceId.type);
+    ostream << pt.get<uint16_t>(loc.pointSourceId);
 
     if (hasTime)
-        ostream << readField<double>(rec, loc.gpsTime.offset, loc.gpsTime.type);
+        ostream << pt.get<double>(loc.gpsTime);
 
     if (hasColor)
     {
-        ostream << readField<uint16_t>(rec, loc.red.offset, loc.red.type);
-        ostream << readField<uint16_t>(rec, loc.green.offset, loc.green.type);
-        ostream << readField<uint16_t>(rec, loc.blue.offset, loc.blue.type);
+        ostream << pt.get<uint16_t>(loc.red);
+        ostream << pt.get<uint16_t>(loc.green);
+        ostream << pt.get<uint16_t>(loc.blue);
     }
 
     if (hasInfrared)
-        ostream << readField<uint16_t>(rec, loc.infrared.offset, loc.infrared.type);
+        ostream << pt.get<uint16_t>(loc.infrared);
 
-    for (const FieldLoc& eloc : extraLocs)
+    for (const Field& eloc : extraLocs)
     {
         Everything e;
         std::memset(&e, 0, sizeof(e));
-        if (eloc.offset >= 0)
-            std::memcpy(&e, rec + eloc.offset, Dimension::size(eloc.type));
+        pt.copyRaw(eloc, &e);
         Utils::insertDim(ostream, eloc.type, e);
     }
 }

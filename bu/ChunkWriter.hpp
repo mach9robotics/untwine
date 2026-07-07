@@ -21,6 +21,7 @@
 
 #include "Stats.hpp"
 #include "../untwine/Common.hpp"
+#include "../untwine/RecordLayout.hpp"
 #include "../untwine/ThreadPool.hpp"
 #include "../untwine/VoxelKey.hpp"
 
@@ -91,19 +92,12 @@ public:
     void stop();
 
 private:
-    // The byte offset and stored type of a dimension within a packed temp record.
-    struct FieldLoc
-    {
-        int offset {-1};                  // -1 == dimension absent from the packed record
-        pdal::Dimension::Type type {pdal::Dimension::Type::None};
-    };
-
-    // The standard-LAS field locations fillPointBuf emits, in point-format order. Resolved once
-    // per chunk in createChunk (offset -1 if absent), so the per-point loop reads a plain offset
-    // instead of hashing m_locById per field per point.
+    // The standard-LAS field locations fillPointBuf emits, in point-format order. Resolved once in
+    // the ctor from m_layout (absent Field if the dimension isn't stored), so the per-point loop
+    // reads through a pre-resolved Field instead of hashing the layout per field per point.
     struct StdLocs
     {
-        FieldLoc x, y, z, intensity, returnNumber, numberOfReturns, bits, classification,
+        Field x, y, z, intensity, returnNumber, numberOfReturns, bits, classification,
             userData, scanAngleRank, pointSourceId, gpsTime, red, green, blue, infrared;
     };
 
@@ -113,26 +107,20 @@ private:
     // Build the LAZ-compressed point block for `chunk` (extra-byte sizing, GPS-time sort), reserve
     // its file location via PyramidManager::newChunk, and write it.
     void createChunk(const Chunk& chunk);
-    // Resolve m_stdLocs from m_b.dimInfo. Run-invariant, so called once in the ctor.
+    // Resolve m_stdLocs from m_layout. Run-invariant, so called once in the ctor.
     void resolveStdLocs();
-    // Emit one packed record `rec` into the LAZ point buffer `buf`: standard fields from `loc`,
+    // Emit one packed point `pt` into the LAZ point buffer `buf`: standard fields from `loc`,
     // extra dimensions from `extraLocs`.
-    void fillPointBuf(const char* rec, std::vector<char>& buf, const StdLocs& loc,
-        const std::vector<FieldLoc>& extraLocs);
-
-    // Read the value stored at rec+offset (interpreted as `stored`) and cast it to T. Robust to
-    // a stored type differing from the requested type.
-    template<typename T>
-    static T readField(const char* rec, int offset, pdal::Dimension::Type stored);
+    void fillPointBuf(const PackedPoint& pt, std::vector<char>& buf, const StdLocs& loc,
+        const std::vector<Field>& extraLocs);
 
     PyramidManager& m_manager;
     const BaseInfo& m_b;
     ThreadPool m_pool;
 
-    // id -> {offset, type} within a packed record, built once from m_b.dimInfo. Used by the stats
-    // loop (keyed on the same pdal::Dimension::Id the producer's IndexedStats use) and to build
-    // m_stdLocs.
-    std::unordered_map<pdal::Dimension::Id, FieldLoc> m_locById;
+    // The packed-record byte layout, built once from m_b.dimInfo. Owns pointSize and the
+    // id/name -> Field table; produces the PackedPoint views every field read goes through.
+    RecordLayout m_layout;
     // The standard fillPointBuf field locations, resolved once (run-invariant) in the ctor.
     StdLocs m_stdLocs;
 };
