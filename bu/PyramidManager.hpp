@@ -17,6 +17,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include "ChunkWriter.hpp"
 #include "CopcSupport.hpp"
 #include "OctantInfo.hpp"
 #include "Stats.hpp"
@@ -44,6 +45,7 @@ public:
     void queue(const OctantInfo& o);
     void queueWithError(const OctantInfo& o, const std::string& error);
     void run();
+    void enqueueChunk(ChunkWriter::Chunk&& chunk);
     void logOctant(const VoxelKey& k, int cnt, const IndexedStats& istats);
     uint64_t totalPoints() const
         { return m_totalPoints; }
@@ -54,7 +56,13 @@ private:
     const int LevelBreak = 4;
     const int MinHierarchySize = 50;
     const BaseInfo& m_b;
+    // Guards the dispatch queue only (m_queue/m_error/m_cv). Kept off the stats path so the
+    // ChunkWriter worker threads (which call logOctant) don't contend with the single dispatcher
+    // that gates the tree walk.
     std::mutex m_mutex;
+    // Guards the post-sample accumulators (m_stats/m_written/m_totalPoints) written by logOctant
+    // from many ChunkWriter threads. Read single-threaded only after the chunk-writer drain.
+    std::mutex m_logMutex;
     std::condition_variable m_cv;
     std::unordered_map<VoxelKey, OctantInfo> m_completes;
     std::queue<OctantInfo> m_queue;
@@ -67,6 +75,9 @@ private:
     //
     std::unordered_map<VoxelKey, int> m_written;
     std::unordered_map<VoxelKey, int> m_childCounts;
+    // Declared last: its destructor joins the writer threads, which use the members above, so it
+    // must be destroyed before them.
+    ChunkWriter m_chunkWriter;
 
     void getInputFiles();
     void process(const OctantInfo& o);

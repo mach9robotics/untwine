@@ -1,6 +1,7 @@
 #pragma once
 
 #include <stdint.h>
+#include <cstdlib>
 #include <array>
 #include <limits>
 #include <string>
@@ -21,6 +22,23 @@ const int CellCount = 128;
 
 using PointCount = uint64_t;
 using StringList = std::vector<std::string>;
+
+// Read a positive-integer tuning override from the environment, clamped to (0, maxVal].
+// Returns dflt when the variable is unset, empty, unparseable, or out of range. This lets the
+// profiling harness (and production) retune BU thread-pool sizes without a rebuild; the values are
+// otherwise hard-coded. The harness already forwards UNTWINE_NUM_CHUNK_WRITERS / UNTWINE_CHUNK_QUEUE_SIZE
+// into the untwine process environment, so getenv() here is the established delivery path.
+inline int envOverride(const char* name, int dflt, int maxVal = 1024)
+{
+    const char* v = std::getenv(name);
+    if (!v || !*v)
+        return dflt;
+    char* end = nullptr;
+    long n = std::strtol(v, &end, 10);
+    if (end == v || *end != '\0' || n <= 0 || n > maxVal)
+        return dflt;
+    return static_cast<int>(n);
+}
 
 struct Options
 {
