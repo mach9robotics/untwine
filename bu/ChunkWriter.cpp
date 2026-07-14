@@ -10,11 +10,14 @@
  *                                                                           *
  ****************************************************************************/
 
+#include <algorithm>
+#include <cmath>
+#include <cstring>
 #include <fstream>
+#include <numeric>
 
 #include <pdal/PDALUtils.hpp>
-#include <pdal/io/BufferReader.hpp>
-#include <pdal/filters/SortFilter.hpp>
+#include <pdal/util/Inserter.hpp>
 
 #include <lazperf/lazperf.hpp>
 #include <lazperf/writers.hpp>
@@ -37,9 +40,40 @@ ChunkWriter::ChunkWriter(PyramidManager& manager, const BaseInfo& b) :
     // idle cores; on fast-storage boxes the build threads already saturate cores, so fewer writers
     // avoid oversubscribing. See untwine::envOverride.
     m_pool(envOverride("UNTWINE_NUM_CHUNK_WRITERS", NumChunkWriters),
-           envOverride("UNTWINE_CHUNK_QUEUE_SIZE", ChunkWriterQueueSize))
+           envOverride("UNTWINE_CHUNK_QUEUE_SIZE", ChunkWriterQueueSize)),
+    // Build the packed-record layout straight from m_b.dimInfo, whose canonical ids/offsets are set
+    // in prep/FilePrep::fillMetadata. Every packed-byte read below goes through the PackedPoint
+    // views this produces; the ctor validates the layout once (fields in-bounds, non-overlapping).
+    m_layout(m_b.dimInfo, m_b.pointSize)
 {
     m_pool.trap(true, "Unknown error in ChunkWriter");
+
+    resolveStdLocs();
+}
+
+// Resolve the standard fillPointBuf field locations from m_layout. Run-invariant (depends only on
+// the layout, fixed for the whole job), so done once here rather than per chunk. Most resolve by
+// canonical id; the packed-bits field has a dynamically-assigned id, so it's matched by name.
+void ChunkWriter::resolveStdLocs()
+{
+    using namespace pdal;
+
+    m_stdLocs.x = m_layout.field(Dimension::Id::X);
+    m_stdLocs.y = m_layout.field(Dimension::Id::Y);
+    m_stdLocs.z = m_layout.field(Dimension::Id::Z);
+    m_stdLocs.intensity = m_layout.field(Dimension::Id::Intensity);
+    m_stdLocs.returnNumber = m_layout.field(Dimension::Id::ReturnNumber);
+    m_stdLocs.numberOfReturns = m_layout.field(Dimension::Id::NumberOfReturns);
+    m_stdLocs.classification = m_layout.field(Dimension::Id::Classification);
+    m_stdLocs.userData = m_layout.field(Dimension::Id::UserData);
+    m_stdLocs.scanAngleRank = m_layout.field(Dimension::Id::ScanAngleRank);
+    m_stdLocs.pointSourceId = m_layout.field(Dimension::Id::PointSourceId);
+    m_stdLocs.gpsTime = m_layout.field(Dimension::Id::GpsTime);
+    m_stdLocs.red = m_layout.field(Dimension::Id::Red);
+    m_stdLocs.green = m_layout.field(Dimension::Id::Green);
+    m_stdLocs.blue = m_layout.field(Dimension::Id::Blue);
+    m_stdLocs.infrared = m_layout.field(Dimension::Id::Infrared);
+    m_stdLocs.bits = m_layout.field(UntwineBitsDimName);
 }
 
 void ChunkWriter::enqueue(Chunk&& chunk)
@@ -64,17 +98,21 @@ void ChunkWriter::stop()
 
 void ChunkWriter::write(Chunk& chunk)
 {
-    // Stats are accumulated here, on the worker thread, rather than on the build thread.
+    // Stats are accumulated here, on the worker thread, rather than on the build thread. Each
+    // (id, Stats) pair keys on the same id the producer registered, so we resolve that id's Field
+    // once and read the value straight from each packed record.
     if (m_b.opts.stats)
     {
-        for (pdal::PointId id = 0; id < chunk.view->size(); ++id)
+        const char* base = chunk.records.data();
+        for (auto& sp : chunk.stats)
         {
-            for (auto& sp : chunk.stats)
-            {
-                pdal::Dimension::Id dim = sp.first;
-                Stats& s = sp.second;
-                s.insert(chunk.view->getFieldAs<double>(dim, id));
-            }
+            pdal::Dimension::Id dim = sp.first;
+            Stats& s = sp.second;
+            Field loc = m_layout.field(dim);
+            if (!loc.present())
+                continue;
+            for (size_t i = 0; i < chunk.count; ++i)
+                s.insert(m_layout.point(base, i).get<double>(loc));
         }
     }
 
@@ -82,54 +120,61 @@ void ChunkWriter::write(Chunk& chunk)
     m_manager.logOctant(chunk.key, (int)chunk.count, chunk.stats);
 }
 
-void ChunkWriter::sortChunk(pdal::PointViewPtr view)
-{
-    pdal::BufferReader r;
-    r.addView(view);
-
-    pdal::SortFilter s;
-    s.setInput(r);
-    pdal::Options o;
-    o.add("dimension", "GpsTime");
-    s.setOptions(o);
-
-    s.prepare(view->table());
-    s.execute(view->table());
-}
-
 void ChunkWriter::createChunk(const Chunk& c)
 {
     using namespace pdal;
 
-    if (c.view->size() == 0)
+    if (c.count == 0)
     {
         m_manager.newChunk(c.key, 0, 0);
         return;
     }
 
-    // Sort the chunk on GPS time.
-    if (c.view->layout()->hasDim(Dimension::Id::GpsTime))
-        sortChunk(c.view);
+    const char* base = c.records.data();
 
-    PointLayoutPtr layout = c.view->layout();
-
+    // Extra-byte size from the dim types directly; no PointLayout needed. Each extra dim's Field
+    // (offset + stored type) comes from the layout; the LAZ extra-byte layout uses dim.m_type,
+    // which matches the stored type.
     int ebCount {0};
-    for (DimType dim : c.extraDims)
-        ebCount += layout->dimSize(dim.m_id);
+    std::vector<Field> extraLocs;
+    extraLocs.reserve(c.extraDims.size());
+    for (const DimType& dim : c.extraDims)
+    {
+        ebCount += (int)Dimension::size(dim.m_type);
+        // Offset from the layout; type pinned to dim.m_type (the LAZ extra-byte type, == the stored
+        // type), so an absent extra dim still emits Dimension::size(dim.m_type) zero bytes.
+        Field eloc = m_layout.field(dim.m_id);
+        eloc.type = dim.m_type;
+        extraLocs.push_back(eloc);
+    }
+
+    // Sort on GPS time, replacing the old PDAL SortFilter. We compute a stable ascending order of
+    // point indices by the GpsTime double read at its packed offset, then emit in that order. If
+    // there's no GpsTime dimension, emit in natural order.
+    std::vector<uint32_t> order(c.count);
+    std::iota(order.begin(), order.end(), 0u);
+    if (m_stdLocs.gpsTime.present())
+    {
+        const Field gps = m_stdLocs.gpsTime;
+        const RecordLayout& layout = m_layout;
+        std::stable_sort(order.begin(), order.end(),
+            [base, gps, &layout](uint32_t a, uint32_t b)
+            {
+                return layout.point(base, a).get<double>(gps) <
+                    layout.point(base, b).get<double>(gps);
+            });
+    }
 
     std::vector<char> buf(lazperf::baseCount(m_b.pointFormatId) + ebCount);
     lazperf::writer::chunk_compressor compressor(m_b.pointFormatId, ebCount);
-    // Resolve the packed-bits dimension once.
-    pdal::Dimension::Id bitsDim = layout->findDim(UntwineBitsDimName);
-    for (PointId idx = 0; idx < c.view->size(); ++idx)
+    for (uint32_t idx : order)
     {
-        PointRef point(*c.view, idx);
-        fillPointBuf(point, buf, bitsDim, c.extraDims);
+        fillPointBuf(m_layout.point(base, idx), buf, m_stdLocs, extraLocs);
         compressor.compress(buf.data());
     }
     std::vector<unsigned char> chunk = compressor.done();
 
-    uint64_t location = m_manager.newChunk(c.key, chunk.size(), (uint32_t)c.view->size());
+    uint64_t location = m_manager.newChunk(c.key, chunk.size(), (uint32_t)c.count);
 
     std::ofstream out(os::toNative(m_b.opts.outputName),
         std::ios::out | std::ios::in | std::ios::binary);
@@ -140,8 +185,8 @@ void ChunkWriter::createChunk(const Chunk& c)
         throw FatalError("Failure writing to file '" + m_b.opts.outputName + "'.");
 }
 
-void ChunkWriter::fillPointBuf(pdal::PointRef& point, std::vector<char>& buf,
-    pdal::Dimension::Id bitsDim, const pdal::DimTypeList& extraDims)
+void ChunkWriter::fillPointBuf(const PackedPoint& pt, std::vector<char>& buf, const StdLocs& loc,
+    const std::vector<Field>& extraLocs)
 {
     using namespace pdal;
 
@@ -151,14 +196,12 @@ void ChunkWriter::fillPointBuf(pdal::PointRef& point, std::vector<char>& buf,
     bool hasColor = m_b.pointFormatId == 7 || m_b.pointFormatId == 8;
     bool hasInfrared = m_b.pointFormatId == 8;
 
-    using namespace Dimension;
-
     uint8_t returnNumber(1);
     uint8_t numberOfReturns(1);
-    if (point.hasDim(Id::ReturnNumber))
-        returnNumber = point.getFieldAs<uint8_t>(Id::ReturnNumber);
-    if (point.hasDim(Id::NumberOfReturns))
-        numberOfReturns = point.getFieldAs<uint8_t>(Id::NumberOfReturns);
+    if (loc.returnNumber.present())
+        returnNumber = pt.get<uint8_t>(loc.returnNumber);
+    if (loc.numberOfReturns.present())
+        numberOfReturns = pt.get<uint8_t>(loc.numberOfReturns);
 
     auto converter = [](double d, Dimension::Id dim) -> int32_t
     {
@@ -172,46 +215,46 @@ void ChunkWriter::fillPointBuf(pdal::PointRef& point, std::vector<char>& buf,
         return i;
     };
 
-    double x = point.getFieldAs<double>(Id::X);
-    int32_t xi = converter((x - m_b.xform.offset.x) / m_b.xform.scale.x, Id::X);
-    double y = point.getFieldAs<double>(Id::Y);
-    int32_t yi = converter((y - m_b.xform.offset.y) / m_b.xform.scale.y, Id::Y);
-    double z = point.getFieldAs<double>(Id::Z);
-    int32_t zi = converter((z - m_b.xform.offset.z) / m_b.xform.scale.z, Id::Z);
+    double x = pt.get<double>(loc.x);
+    int32_t xi = converter((x - m_b.xform.offset.x) / m_b.xform.scale.x, Dimension::Id::X);
+    double y = pt.get<double>(loc.y);
+    int32_t yi = converter((y - m_b.xform.offset.y) / m_b.xform.scale.y, Dimension::Id::Y);
+    double z = pt.get<double>(loc.z);
+    int32_t zi = converter((z - m_b.xform.offset.z) / m_b.xform.scale.z, Dimension::Id::Z);
 
     ostream << xi << yi << zi;
 
-    ostream << point.getFieldAs<uint16_t>(Id::Intensity);
+    ostream << pt.get<uint16_t>(loc.intensity);
     ostream << (uint8_t)(returnNumber | (numberOfReturns << 4));
-    ostream << point.getFieldAs<uint8_t>(bitsDim);
-    ostream << point.getFieldAs<uint8_t>(Id::Classification);
+    ostream << pt.get<uint8_t>(loc.bits);
+    ostream << pt.get<uint8_t>(loc.classification);
 
-    uint8_t userData = point.getFieldAs<uint8_t>(Id::UserData);
+    uint8_t userData = pt.get<uint8_t>(loc.userData);
     int16_t scanAngleRank =
-        static_cast<int16_t>(std::round(
-            point.getFieldAs<float>(Id::ScanAngleRank) / .006f));
+        static_cast<int16_t>(std::round(pt.get<float>(loc.scanAngleRank) / .006f));
     ostream << userData << scanAngleRank;
 
-    ostream << point.getFieldAs<uint16_t>(Id::PointSourceId);
+    ostream << pt.get<uint16_t>(loc.pointSourceId);
 
     if (hasTime)
-        ostream << point.getFieldAs<double>(Id::GpsTime);
+        ostream << pt.get<double>(loc.gpsTime);
 
     if (hasColor)
     {
-        ostream << point.getFieldAs<uint16_t>(Id::Red);
-        ostream << point.getFieldAs<uint16_t>(Id::Green);
-        ostream << point.getFieldAs<uint16_t>(Id::Blue);
+        ostream << pt.get<uint16_t>(loc.red);
+        ostream << pt.get<uint16_t>(loc.green);
+        ostream << pt.get<uint16_t>(loc.blue);
     }
 
     if (hasInfrared)
-        ostream << point.getFieldAs<uint16_t>(Id::Infrared);
+        ostream << pt.get<uint16_t>(loc.infrared);
 
-    Everything e;
-    for (auto& dim : extraDims)
+    for (const Field& eloc : extraLocs)
     {
-        point.getField((char *)&e, dim.m_id, dim.m_type);
-        Utils::insertDim(ostream, dim.m_type, e);
+        Everything e;
+        std::memset(&e, 0, sizeof(e));
+        pt.copyRaw(eloc, &e);
+        Utils::insertDim(ostream, eloc.type, e);
     }
 }
 
