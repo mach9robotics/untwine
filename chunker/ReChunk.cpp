@@ -12,6 +12,7 @@
 
 #include <cmath>
 #include <fstream>
+#include <thread>
 
 #include <pdal/util/FileUtils.hpp>
 
@@ -21,6 +22,7 @@
 
 #include "../untwine/Common.hpp"
 #include "../untwine/Point.hpp"
+#include "../untwine/ThreadPool.hpp"
 #include "../bu/ChunkPlan.hpp"  // bu::childOctant
 
 #include <stringconv.hpp>  // untwine/os
@@ -135,9 +137,12 @@ std::vector<VoxelKey> rechunkFile(const std::string& tempDir, const pdal::BOX3D&
     }
 
     // Pass 2: route each record to its octant's .bin. Occupancy is known, so the output streams
-    // can be opened up front; ofstream's own buffering batches the per-record appends.
+    // can be opened up front. Records are staged in per-octant block buffers and written out in
+    // block-sized chunks — a per-record ofstream::write of a few dozen bytes costs more in stream
+    // bookkeeping than in I/O and dominates the split otherwise.
     {
         std::array<std::ofstream, 8> outs;
+        std::array<std::vector<char>, 8> bufs;
         for (int i = 0; i < 8; ++i)
         {
             if (!counts[i])
@@ -146,6 +151,7 @@ std::vector<VoxelKey> rechunkFile(const std::string& tempDir, const pdal::BOX3D&
             outs[i].open(os::toNative(childPath), std::ios::binary | std::ios::trunc);
             if (!outs[i])
                 throw FatalError("Couldn't open '" + childPath + "' for output.");
+            bufs[i].reserve(ReadBlockBytes);
         }
         forEachBlock(path, pointSize, [&](const char *block, uint64_t n)
         {
@@ -153,12 +159,23 @@ std::vector<VoxelKey> rechunkFile(const std::string& tempDir, const pdal::BOX3D&
             {
                 const char *rec = block + i * pointSize;
                 const Point p(const_cast<char *>(rec));
-                outs[bu::childOctant(p.x(), p.y(), p.z(), nodeBounds)].write(rec, pointSize);
+                const int oct = bu::childOctant(p.x(), p.y(), p.z(), nodeBounds);
+                std::vector<char>& buf = bufs[oct];
+                buf.insert(buf.end(), rec, rec + pointSize);
+                if (buf.size() + pointSize > ReadBlockBytes)
+                {
+                    outs[oct].write(buf.data(), buf.size());
+                    buf.clear();
+                }
             }
         });
         for (int i = 0; i < 8; ++i)
+        {
+            if (!bufs[i].empty())
+                outs[i].write(bufs[i].data(), bufs[i].size());
             if (counts[i] && !outs[i])
                 throw FatalError("Write failed re-chunking '" + path + "'.");
+        }
     }
     pdal::FileUtils::deleteFile(path);
 
@@ -184,15 +201,34 @@ size_t rechunkOversized(const std::string& tempDir, const pdal::BOX3D& fullBound
     for (const auto& c : cellCounts)
         rootCounts[lut.cellToRoot.at(c.first)] += c.second;
 
-    size_t split = 0;
+    std::vector<VoxelKey> oversized;
     for (const auto& rc : rootCounts)
+        if (rc.second > target)
+            oversized.push_back(rc.first);
+    if (oversized.empty())
+        return 0;
+
+    // One task per oversized chunk; each recursion touches only its own subtree's files, so the
+    // tasks are independent. The sparse-bounds case (a tight cloud in a huge declared bbox) can
+    // make most chunks oversized at once, so the split has to run wide, not serially.
+    std::size_t nthreads = std::thread::hardware_concurrency();
+    if (nthreads == 0)
+        nthreads = DefaultWorkerThreads;
+    ThreadPool pool(nthreads);
+    pool.trap(true);
+    for (const VoxelKey& key : oversized)
+        pool.add([&, key]()
+        {
+            rechunkFile(tempDir, fullBounds, pointSize, key, target);
+        });
+    pool.await();
+    if (pool.hasErrors())
     {
-        if (rc.second <= target)
-            continue;
-        rechunkFile(tempDir, fullBounds, pointSize, rc.first, target);
-        ++split;
+        std::vector<std::string> errs = pool.clearErrors();
+        throw FatalError(errs.empty() ? std::string("Re-chunk failed.") : errs.front());
     }
-    return split;
+    pool.join();
+    return oversized.size();
 }
 
 } // namespace chunker
