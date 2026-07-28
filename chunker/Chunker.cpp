@@ -18,6 +18,7 @@
 #include "Constants.hpp"
 #include "CountPass.hpp"
 #include "Distribute.hpp"
+#include "ReChunk.hpp"
 
 #include "../untwine/Common.hpp"
 #include "../untwine/FileInfo.hpp"
@@ -66,6 +67,15 @@ void Chunker::run(ProgressWriter& progress, std::vector<FileInfo>& fileInfos)
     // Chunking step 2b, distribute: decode again and route each point through the LUT into its
     // chunk's .bin. The Indexing phase bu::indexChunks then builds a local octree from each.
     distribute(m_b, fileInfos, grid, lut, progress);
+
+    // Chunking step 3, re-chunk: the budget is soft — a single count-grid cell over the budget
+    // became its own chunk whole. Recursively split any such chunk's .bin (packed-point
+    // read/route, no decode) so the Indexing phase never loads an unbounded chunk. Costs nothing
+    // when no chunk is oversized, the normal case.
+    size_t split = rechunkOversized(m_b.opts.tempDir, m_b.bounds, m_b.pointSize, lut,
+        cellCounts, target);
+    if (split && m_b.opts.progressDebug)
+        std::cerr << "[chunking] re-chunked " << split << " oversized chunk(s)\n";
 }
 
 } // namespace chunker

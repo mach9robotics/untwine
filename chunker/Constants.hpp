@@ -35,6 +35,11 @@ constexpr int CountGridLevelSmall = 7;   // 128^3
 constexpr int CountGridLevelMedium = 8;  // 256^3
 constexpr int CountGridLevelLarge = 9;   // 512^3
 
+// Depth cap for the re-chunk pass's recursive split of oversized chunks. A coincident point
+// cluster occupies one octant at every level, so without a floor the split would recurse forever;
+// matches the MaxBuildLevel guard the Indexing phase uses for the same pathology.
+constexpr int MaxRechunkLevel = 30;
+
 // Fallback worker-thread count when std::thread::hardware_concurrency() reports 0.
 constexpr unsigned DefaultWorkerThreads = 8;
 

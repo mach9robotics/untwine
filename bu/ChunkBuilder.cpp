@@ -15,6 +15,7 @@
 #include <cstring>
 #include <fstream>
 #include <functional>
+#include <limits>
 #include <numeric>
 #include <thread>
 #include <unordered_set>
@@ -78,6 +79,15 @@ public:
         // Load the whole chunk's points into one flat index space.
         for (auto& p : m_leaves)
             m_points.read(p.second);
+
+        // The chunker's re-chunk pass splits oversized chunks, but a coincident-point cluster
+        // can't be split spatially, so the chunk budget still isn't a hard bound. The int index
+        // space overflows (UB) past INT_MAX points; fail cleanly instead.
+        if (m_points.size() > (size_t)(std::numeric_limits<int>::max)())
+            throw FatalError("Chunk " + m_root.toString() + " holds " +
+                std::to_string(m_points.size()) + " points, more than the chunk-local build "
+                "can index. Rerun without --chunker.");
+
         std::vector<int> all(m_points.size());
         std::iota(all.begin(), all.end(), 0);
 

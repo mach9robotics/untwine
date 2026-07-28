@@ -72,10 +72,12 @@ UNTWINE_ADD_TEST(untwine_unit_test
         PipelineIntegrationTest.cpp
         ChunkBuildTest.cpp
         ChunkLutTest.cpp
+        ReChunkTest.cpp
         ThreadPoolTest.cpp
         ${PROJECT_SOURCE_DIR}/pointio/Grid.cpp
         ${PROJECT_SOURCE_DIR}/bu/Stats.cpp
         ${PROJECT_SOURCE_DIR}/bu/ChunkPlan.cpp
         ${PROJECT_SOURCE_DIR}/chunker/ChunkLut.cpp
+        ${PROJECT_SOURCE_DIR}/chunker/ReChunk.cpp
         ${PROJECT_SOURCE_DIR}/untwine/ThreadPool.cpp
 )
