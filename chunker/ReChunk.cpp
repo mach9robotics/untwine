@@ -13,6 +13,7 @@
 #include <algorithm>
 #include <cmath>
 #include <fstream>
+#include <functional>
 #include <thread>
 
 #include <pdal/util/FileUtils.hpp>
@@ -100,16 +101,19 @@ std::array<uint64_t, 8> countOctants(const char *data, uint64_t count, size_t po
     return counts;
 }
 
-std::vector<VoxelKey> rechunkFile(const std::string& tempDir, const pdal::BOX3D& fullBounds,
-    size_t pointSize, const VoxelKey& key, uint64_t target)
+// Split `<key>.bin` one level: route its records into the child octants' .bins (or rename when a
+// single octant holds everything) and return the children created, each with its point count.
+// Returns an empty vector when the file is terminal — already within `target` or at the level
+// cap (a coincident cluster never separates; the Indexing phase guards the residual case).
+// Each call touches only its own subtree's files, so distinct keys split concurrently.
+std::vector<std::pair<VoxelKey, uint64_t>> splitChunkOnce(const std::string& tempDir,
+    const pdal::BOX3D& fullBounds, size_t pointSize, const VoxelKey& key, uint64_t target)
 {
     const std::string path = binPath(tempDir, key);
     const uint64_t count = pdal::FileUtils::fileSize(path) / pointSize;
 
-    // Under budget, or too deep to keep splitting (a coincident cluster never separates): this is
-    // a final chunk. The Indexing phase splits what it can in RAM and guards the residual case.
     if (count <= target || key.level() >= MaxRechunkLevel)
-        return { key };
+        return {};
 
     const pdal::BOX3D nodeBounds = voxelBounds(fullBounds, key);
 
@@ -134,7 +138,7 @@ std::vector<VoxelKey> rechunkFile(const std::string& tempDir, const pdal::BOX3D&
             ++dir;
         const VoxelKey child = key.child(dir);
         pdal::FileUtils::renameFile(binPath(tempDir, child), path);
-        return rechunkFile(tempDir, fullBounds, pointSize, child, target);
+        return { { child, count } };
     }
 
     // Pass 2: route each record to its octant's .bin. Occupancy is known, so the output streams
@@ -180,16 +184,38 @@ std::vector<VoxelKey> rechunkFile(const std::string& tempDir, const pdal::BOX3D&
     }
     pdal::FileUtils::deleteFile(path);
 
-    std::vector<VoxelKey> chunks;
+    std::vector<std::pair<VoxelKey, uint64_t>> children;
     for (int i = 0; i < 8; ++i)
+        if (counts[i])
+            children.emplace_back(key.child(i), counts[i]);
+    return children;
+}
+
+std::vector<VoxelKey> rechunkFile(const std::string& tempDir, const pdal::BOX3D& fullBounds,
+    size_t pointSize, const VoxelKey& key, uint64_t target)
+{
+    std::vector<VoxelKey> finals;
+    std::vector<VoxelKey> work{ key };
+    while (!work.empty())
     {
-        if (!counts[i])
+        const VoxelKey k = work.back();
+        work.pop_back();
+        std::vector<std::pair<VoxelKey, uint64_t>> children =
+            splitChunkOnce(tempDir, fullBounds, pointSize, k, target);
+        if (children.empty())
+        {
+            finals.push_back(k);
             continue;
-        std::vector<VoxelKey> sub =
-            rechunkFile(tempDir, fullBounds, pointSize, key.child(i), target);
-        chunks.insert(chunks.end(), sub.begin(), sub.end());
+        }
+        for (const auto& c : children)
+        {
+            if (c.second > target)
+                work.push_back(c.first);
+            else
+                finals.push_back(c.first);
+        }
     }
-    return chunks;
+    return finals;
 }
 
 size_t rechunkOversized(const std::string& tempDir, const pdal::BOX3D& fullBounds,
@@ -212,19 +238,31 @@ size_t rechunkOversized(const std::string& tempDir, const pdal::BOX3D& fullBound
     if (oversized.empty())
         return 0;
 
-    // One task per oversized chunk; each recursion touches only its own subtree's files, so the
-    // tasks are independent. The sparse-bounds case (a tight cloud in a huge declared bbox) can
-    // make most chunks oversized at once, so the split has to run wide, not serially.
+    // One task per SPLIT STEP, not per oversized chunk: a task splits its file one level and
+    // re-enqueues each still-oversized child as its own task, so the fan-out grows 8x per level
+    // and a single monster chunk spreads across the pool instead of pinning one thread (the
+    // sparse-bounds case concentrates most of the input in a handful of chunks). Tasks touch
+    // only their own subtree's files, so steps are independent. await() is documented to allow
+    // add() while awaiting, and returns only when the queue is empty AND nothing is running —
+    // a running task enqueues its children before it completes, so no work is missed.
     std::size_t nthreads = std::thread::hardware_concurrency();
     if (nthreads == 0)
         nthreads = DefaultWorkerThreads;
     ThreadPool pool(nthreads);
     pool.trap(true);
-    for (const VoxelKey& key : oversized)
+    std::function<void(const VoxelKey&)> submit = [&](const VoxelKey& key)
+    {
         pool.add([&, key]()
         {
-            rechunkFile(tempDir, fullBounds, pointSize, key, target);
+            const std::vector<std::pair<VoxelKey, uint64_t>> children =
+                splitChunkOnce(tempDir, fullBounds, pointSize, key, target);
+            for (const auto& c : children)
+                if (c.second > target)
+                    submit(c.first);
         });
+    };
+    for (const VoxelKey& key : oversized)
+        submit(key);
     pool.await();
     if (pool.hasErrors())
     {
