@@ -123,34 +123,36 @@ TEST(ReChunk, voxel_bounds_subdivision)
     EXPECT_DOUBLE_EQ(b.miny, 0); EXPECT_DOUBLE_EQ(b.maxy, 2);
 }
 
-// countOctants bins by the node midpoint with the >= boundary rule and the VoxelKey::child bit
-// layout (bit 0 x, bit 1 y, bit 2 z).
-TEST(ReChunk, count_octants_midpoint_and_bit_layout)
+// The split bins by octant midpoints with the >= boundary rule and the VoxelKey::child bit
+// layout (bit 0 x, bit 1 y, bit 2 z): each point of a one-per-octant chunk lands in the child
+// whose bit pattern matches its position, and a midpoint-exact point goes to the upper side.
+TEST(ReChunk, split_midpoint_and_bit_layout)
 {
-    const pdal::BOX3D b = cube(0, 8);   // midpoint (4,4,4)
+    const std::string dir = testDir("bit_layout");
+    const pdal::BOX3D full = cube(0, 8);
+    const VoxelKey key(0, 0, 0, 0);   // whole bounds, midpoint (4,4,4)
 
-    std::vector<char> data;
-    auto add = [&](double x, double y, double z)
-    {
-        std::vector<char> rec = makePoint(x, y, z, 0);
-        data.insert(data.end(), rec.begin(), rec.end());
+    std::vector<TestPoint> pts{
+        { 1, 1, 1, 0 },   // low corner -> octant 0
+        { 5, 1, 1, 1 },   // +x -> octant 1
+        { 1, 5, 1, 2 },   // +y -> octant 2
+        { 1, 1, 5, 4 },   // +z -> octant 4
+        { 5, 5, 5, 7 },   // high corner -> octant 7
+        { 4, 4, 4, 7 },   // exactly on the midpoint -> upper side, octant 7
     };
-    add(1, 1, 1);   // low corner -> octant 0
-    add(5, 1, 1);   // +x -> octant 1
-    add(1, 5, 1);   // +y -> octant 2
-    add(1, 1, 5);   // +z -> octant 4
-    add(5, 5, 5);   // high corner -> octant 7
-    add(4, 4, 4);   // exactly on the midpoint -> upper side, octant 7
+    writeBin(dir, key, pts);
 
-    std::array<uint64_t, 8> c = countOctants(data.data(), 6, PointSize, b);
-    EXPECT_EQ(c[0], 1u);
-    EXPECT_EQ(c[1], 1u);
-    EXPECT_EQ(c[2], 1u);
-    EXPECT_EQ(c[3], 0u);
-    EXPECT_EQ(c[4], 1u);
-    EXPECT_EQ(c[5], 0u);
-    EXPECT_EQ(c[6], 0u);
-    EXPECT_EQ(c[7], 2u);
+    rechunkFile(dir, full, PointSize, key, /*target=*/2);
+
+    auto bins = readAllBins(dir);
+    for (const auto& b : bins)
+        for (const TestPoint& p : b.second)
+        {
+            // Each point's id encodes its expected octant of the level-1 split.
+            const VoxelKey expect = key.child((int)p.id);
+            EXPECT_EQ(b.first, expect.toString())
+                << "point " << p.x << "," << p.y << "," << p.z << " in wrong cell";
+        }
 }
 
 // A chunk under the budget is left alone.
@@ -214,8 +216,9 @@ TEST(ReChunk, oversized_chunk_splits_losslessly_under_budget)
     EXPECT_EQ(ids.size(), pts.size()) << "ids must survive the split uniquely";
 }
 
-// A tight cluster occupying one octant descends by rename (no rewrite) until it separates, so the
-// resulting chunks sit several levels below the original key.
+// A tight cluster keeps descending — every split step lands everything in one child — until the
+// midpoint finally separates it, so the resulting chunks sit several levels below the original
+// key.
 TEST(ReChunk, single_octant_cluster_descends_until_it_separates)
 {
     const std::string dir = testDir("descend");

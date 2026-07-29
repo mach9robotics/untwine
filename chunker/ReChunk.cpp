@@ -14,6 +14,7 @@
 #include <cmath>
 #include <fstream>
 #include <functional>
+#include <memory>
 #include <thread>
 
 #include <pdal/util/FileUtils.hpp>
@@ -89,24 +90,30 @@ pdal::BOX3D voxelBounds(const pdal::BOX3D& fullBounds, const VoxelKey& key)
     return b;
 }
 
-std::array<uint64_t, 8> countOctants(const char *data, uint64_t count, size_t pointSize,
-    const pdal::BOX3D& nodeBounds)
+// Levels one split step descends: the smallest d with 8^d >= count/target, so a uniform spread
+// lands each child at or under the target in a single pass (the trick localGridDepth uses for the
+// in-RAM build). Capped by MaxSplitStepDepth to bound the open files and staging buffers, and by
+// the headroom left below MaxRechunkLevel.
+int splitStepDepth(uint64_t count, uint64_t target, int level)
 {
-    std::array<uint64_t, 8> counts{};
-    for (uint64_t i = 0; i < count; ++i)
-    {
-        const Point p(const_cast<char *>(data + i * pointSize));
-        counts[bu::childOctant(p.x(), p.y(), p.z(), nodeBounds)]++;
-    }
-    return counts;
+    const uint64_t ratio = (count + target - 1) / target;
+    int d = 1;
+    while (d < MaxSplitStepDepth && (uint64_t(1) << (3 * d)) < ratio)
+        ++d;
+    if (d > MaxRechunkLevel - level)
+        d = MaxRechunkLevel - level;
+    return d < 1 ? 1 : d;
 }
 
-// Split `<key>.bin` one level: route its records into the child octants' .bins (or rename when a
-// single octant holds everything) and return the children created, each with its point count.
-// Returns an empty vector when the file is terminal — already within `target` or at the level
-// cap (a coincident cluster never separates; the Indexing phase guards the residual case).
-// Each call touches only its own subtree's files, so distinct keys split concurrently.
-std::vector<std::pair<VoxelKey, uint64_t>> splitChunkOnce(const std::string& tempDir,
+// Split `<key>.bin` several levels in ONE read+write pass: each record's descendant cell `d`
+// levels down is found by walking the octant midpoints, and the record is dealt directly into
+// that cell's .bin. One pass regardless of depth is the point — a per-level split rewrites the
+// same bytes at every level, and the first level of a monster chunk is inherently serial, so
+// levels are the thing to economize. Returns the children created, each with its point count;
+// empty when the file is terminal — within `target`, or at the level cap (a coincident cluster
+// never separates; the Indexing phase guards the residual case). Each call touches only its own
+// subtree's files, so distinct keys split concurrently.
+std::vector<std::pair<VoxelKey, uint64_t>> splitChunkStep(const std::string& tempDir,
     const pdal::BOX3D& fullBounds, size_t pointSize, const VoxelKey& key, uint64_t target)
 {
     const std::string path = binPath(tempDir, key);
@@ -116,78 +123,77 @@ std::vector<std::pair<VoxelKey, uint64_t>> splitChunkOnce(const std::string& tem
         return {};
 
     const pdal::BOX3D nodeBounds = voxelBounds(fullBounds, key);
+    const int depth = splitStepDepth(count, target, key.level());
 
-    // Pass 1: octant occupancy, so a no-op split (everything in one octant) is a rename rather
-    // than a rewrite.
-    std::array<uint64_t, 8> counts{};
+    // Cells are created lazily on first point: a clustered chunk occupies few of the 8^d slots.
+    // Records stage in per-cell buffers flushed in blocks — a per-record ofstream::write costs
+    // more in stream bookkeeping than in I/O.
+    struct Cell
+    {
+        VoxelKey key;
+        std::ofstream out;
+        std::vector<char> buf;
+        uint64_t count = 0;
+    };
+    std::vector<std::unique_ptr<Cell>> cells(size_t(1) << (3 * depth));
+
     forEachBlock(path, pointSize, [&](const char *block, uint64_t n)
     {
-        const std::array<uint64_t, 8> c = countOctants(block, n, pointSize, nodeBounds);
-        for (int i = 0; i < 8; ++i)
-            counts[i] += c[i];
+        for (uint64_t i = 0; i < n; ++i)
+        {
+            const char *rec = block + i * pointSize;
+            const Point p(const_cast<char *>(rec));
+
+            // Walk down `depth` levels of octant midpoints, same subdivision as voxelBounds.
+            VoxelKey k = key;
+            pdal::BOX3D b = nodeBounds;
+            size_t slot = 0;
+            for (int lvl = 0; lvl < depth; ++lvl)
+            {
+                const int oct = bu::childOctant(p.x(), p.y(), p.z(), b);
+                const double mx = (b.minx + b.maxx) * 0.5;
+                const double my = (b.miny + b.maxy) * 0.5;
+                const double mz = (b.minz + b.maxz) * 0.5;
+                if (oct & 1) b.minx = mx; else b.maxx = mx;
+                if (oct & 2) b.miny = my; else b.maxy = my;
+                if (oct & 4) b.minz = mz; else b.maxz = mz;
+                k = k.child(oct);
+                slot = slot * 8 + oct;
+            }
+
+            std::unique_ptr<Cell>& c = cells[slot];
+            if (!c)
+            {
+                c.reset(new Cell);
+                c->key = k;
+                const std::string cellPath = binPath(tempDir, k);
+                c->out.open(os::toNative(cellPath), std::ios::binary | std::ios::trunc);
+                if (!c->out)
+                    throw FatalError("Couldn't open '" + cellPath + "' for output.");
+                c->buf.reserve(SplitStageBytes);
+            }
+            c->buf.insert(c->buf.end(), rec, rec + pointSize);
+            c->count++;
+            if (c->buf.size() + pointSize > SplitStageBytes)
+            {
+                c->out.write(c->buf.data(), c->buf.size());
+                c->buf.clear();
+            }
+        }
     });
 
-    int occupied = 0;
-    for (int i = 0; i < 8; ++i)
-        if (counts[i])
-            ++occupied;
-    if (occupied == 1)
+    std::vector<std::pair<VoxelKey, uint64_t>> children;
+    for (std::unique_ptr<Cell>& c : cells)
     {
-        int dir = 0;
-        while (!counts[dir])
-            ++dir;
-        const VoxelKey child = key.child(dir);
-        pdal::FileUtils::renameFile(binPath(tempDir, child), path);
-        return { { child, count } };
-    }
-
-    // Pass 2: route each record to its octant's .bin. Occupancy is known, so the output streams
-    // can be opened up front. Records are staged in per-octant block buffers and written out in
-    // block-sized chunks — a per-record ofstream::write of a few dozen bytes costs more in stream
-    // bookkeeping than in I/O and dominates the split otherwise.
-    {
-        std::array<std::ofstream, 8> outs;
-        std::array<std::vector<char>, 8> bufs;
-        for (int i = 0; i < 8; ++i)
-        {
-            if (!counts[i])
-                continue;
-            const std::string childPath = binPath(tempDir, key.child(i));
-            outs[i].open(os::toNative(childPath), std::ios::binary | std::ios::trunc);
-            if (!outs[i])
-                throw FatalError("Couldn't open '" + childPath + "' for output.");
-            bufs[i].reserve(ReadBlockBytes);
-        }
-        forEachBlock(path, pointSize, [&](const char *block, uint64_t n)
-        {
-            for (uint64_t i = 0; i < n; ++i)
-            {
-                const char *rec = block + i * pointSize;
-                const Point p(const_cast<char *>(rec));
-                const int oct = bu::childOctant(p.x(), p.y(), p.z(), nodeBounds);
-                std::vector<char>& buf = bufs[oct];
-                buf.insert(buf.end(), rec, rec + pointSize);
-                if (buf.size() + pointSize > ReadBlockBytes)
-                {
-                    outs[oct].write(buf.data(), buf.size());
-                    buf.clear();
-                }
-            }
-        });
-        for (int i = 0; i < 8; ++i)
-        {
-            if (!bufs[i].empty())
-                outs[i].write(bufs[i].data(), bufs[i].size());
-            if (counts[i] && !outs[i])
-                throw FatalError("Write failed re-chunking '" + path + "'.");
-        }
+        if (!c)
+            continue;
+        if (!c->buf.empty())
+            c->out.write(c->buf.data(), c->buf.size());
+        if (!c->out)
+            throw FatalError("Write failed re-chunking '" + path + "'.");
+        children.emplace_back(c->key, c->count);
     }
     pdal::FileUtils::deleteFile(path);
-
-    std::vector<std::pair<VoxelKey, uint64_t>> children;
-    for (int i = 0; i < 8; ++i)
-        if (counts[i])
-            children.emplace_back(key.child(i), counts[i]);
     return children;
 }
 
@@ -201,7 +207,7 @@ std::vector<VoxelKey> rechunkFile(const std::string& tempDir, const pdal::BOX3D&
         const VoxelKey k = work.back();
         work.pop_back();
         std::vector<std::pair<VoxelKey, uint64_t>> children =
-            splitChunkOnce(tempDir, fullBounds, pointSize, k, target);
+            splitChunkStep(tempDir, fullBounds, pointSize, k, target);
         if (children.empty())
         {
             finals.push_back(k);
@@ -255,7 +261,7 @@ size_t rechunkOversized(const std::string& tempDir, const pdal::BOX3D& fullBound
         pool.add([&, key]()
         {
             const std::vector<std::pair<VoxelKey, uint64_t>> children =
-                splitChunkOnce(tempDir, fullBounds, pointSize, key, target);
+                splitChunkStep(tempDir, fullBounds, pointSize, key, target);
             for (const auto& c : children)
                 if (c.second > target)
                     submit(c.first);

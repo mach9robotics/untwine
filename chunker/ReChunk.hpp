@@ -12,7 +12,6 @@
 
 #pragma once
 
-#include <array>
 #include <cstdint>
 #include <string>
 #include <unordered_map>
@@ -43,15 +42,11 @@ struct ChunkLut;
 // computes, without dragging in that class's sampling machinery.
 pdal::BOX3D voxelBounds(const pdal::BOX3D& fullBounds, const VoxelKey& key);
 
-// One sequential pass over a chunk .bin: how many of its `count` packed points fall in each child
-// octant of `nodeBounds`. Octant order matches VoxelKey::child / bu::childOctant.
-std::array<uint64_t, 8> countOctants(const char *data, uint64_t count, size_t pointSize,
-    const pdal::BOX3D& nodeBounds);
-
 // Recursively split `<key>.bin` in `tempDir` until every resulting chunk holds at most `target`
-// points or sits at MaxRechunkLevel. A split with a single occupied octant is a rename, not a
-// rewrite, so a tight cluster descends cheaply until it either separates or hits the level cap.
-// Returns the keys of the resulting chunk .bins (just `key` if no split was needed).
+// points or sits at MaxRechunkLevel. Each step deals the records several levels down in a single
+// read+write pass (splitStepDepth levels, sized so a uniform spread reaches the target at once),
+// so the cost is passes-over-the-bytes, not octree levels. Returns the keys of the resulting
+// chunk .bins (just `key` if no split was needed).
 std::vector<VoxelKey> rechunkFile(const std::string& tempDir, const pdal::BOX3D& fullBounds,
     size_t pointSize, const VoxelKey& key, uint64_t target);
 

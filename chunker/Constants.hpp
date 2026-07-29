@@ -51,6 +51,13 @@ constexpr int CountGridLevelLarge = 9;   // 512^3
 // matches the MaxBuildLevel guard the Indexing phase uses for the same pathology.
 constexpr int MaxRechunkLevel = 30;
 
+// Bounds for one re-chunk split step. MaxSplitStepDepth caps how many levels a single
+// read+write pass descends (8^d output files and staging buffers open at once: depth 3 = up to
+// 512). SplitStageBytes is the per-output staging buffer, batching records into block-sized
+// writes; worst case memory per split task = 8^MaxSplitStepDepth * SplitStageBytes = 512 MB.
+constexpr int MaxSplitStepDepth = 3;
+constexpr std::size_t SplitStageBytes = 1024 * 1024;
+
 // Fallback worker-thread count when std::thread::hardware_concurrency() reports 0.
 constexpr unsigned DefaultWorkerThreads = 8;
 
