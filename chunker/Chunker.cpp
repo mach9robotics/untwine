@@ -10,6 +10,7 @@
  *                                                                           *
  ****************************************************************************/
 
+#include <cstdlib>
 #include <iostream>
 #include <thread>
 
@@ -57,12 +58,25 @@ void Chunker::run(ProgressWriter& progress, std::vector<FileInfo>& fileInfos)
     uint64_t target = m_b.opts.maxChunkPoints ? m_b.opts.maxChunkPoints : DefaultMaxChunkPoints;
     ChunkLut lut = buildChunkLut(cellCounts, target);
 
+    // Re-chunk trigger, tunable without a rebuild (UNTWINE_RECHUNK_TRIGGER, points) for
+    // experiments on where the split-vs-load-whole tradeoff sits; envOverride() is int-typed, so
+    // parse the 64-bit value here. Invalid/unset -> the compiled default.
+    uint64_t trigger = RechunkTriggerPoints;
+    if (const char *env = std::getenv("UNTWINE_RECHUNK_TRIGGER"))
+    {
+        char *end = nullptr;
+        unsigned long long n = std::strtoull(env, &end, 10);
+        if (end != env && *end == '\0' && n > 0)
+            trigger = n;
+    }
+
     if (m_b.opts.progressDebug)
         std::cerr << "[chunking] count-level " << countLevel
                   << " | occupied cells " << cellCounts.size()
                   << " | counted points " << counted << " (input " << m_b.numPoints << ")"
                   << " | target " << target
                   << " | chunks " << lut.roots.size() << "\n";
+
 
     // Chunking step 2b, distribute: decode again and route each point through the LUT into its
     // chunk's .bin. The Indexing phase bu::indexChunks then builds a local octree from each.
@@ -75,7 +89,7 @@ void Chunker::run(ProgressWriter& progress, std::vector<FileInfo>& fileInfos)
     // the chunk-local build splits those in RAM. Costs nothing when nothing crosses the trigger,
     // the normal case.
     size_t split = rechunkOversized(m_b.opts.tempDir, m_b.bounds, m_b.pointSize, lut,
-        cellCounts, RechunkTriggerPoints, target);
+        cellCounts, trigger, target);
     if (split && m_b.opts.progressDebug)
         std::cerr << "[chunking] re-chunked " << split << " oversized chunk(s)\n";
 }
