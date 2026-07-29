@@ -64,7 +64,16 @@ struct ChunkPlan
     std::unordered_map<VoxelKey, FileInfo> leaves;
 };
 
-// Indexing: builds one chunk's local octree in RAM and emits a COPC chunk per node.
+// Widest chunk the narrow (int32) index space can address. The re-chunk pass keeps real chunks
+// far below this; only a coincident-coordinate cluster (unsplittable by position) can cross it,
+// and that chunk gets the wide instantiation below instead of a failure.
+constexpr uint64_t MaxNarrowChunkPoints = 2'147'483'647;
+
+// Indexing: builds one chunk's local octree in RAM and emits a COPC chunk per node. Templated on
+// the point-index type: chunks are indexed with int32 (halving index RAM across the several live
+// index vectors), and the rare over-2^31 chunk — which int32 cannot address without UB — is built
+// with int64 instead, proceeding bounded by RAM alone like prior untwine's 64-bit PointId BU.
+template <typename Idx>
 class ChunkBuilder
 {
 public:
@@ -80,16 +89,8 @@ public:
         for (auto& p : m_leaves)
             m_points.read(p.second);
 
-        // The chunker's re-chunk pass splits oversized chunks, but a coincident-point cluster
-        // can't be split spatially, so the chunk budget still isn't a hard bound. The int index
-        // space overflows (UB) past INT_MAX points; fail cleanly instead.
-        if (m_points.size() > (size_t)(std::numeric_limits<int>::max)())
-            throw FatalError("Chunk " + m_root.toString() + " holds " +
-                std::to_string(m_points.size()) + " points, more than the chunk-local build "
-                "can index. Rerun without --chunker.");
-
-        std::vector<int> all(m_points.size());
-        std::iota(all.begin(), all.end(), 0);
+        std::vector<Idx> all(m_points.size());
+        std::iota(all.begin(), all.end(), Idx(0));
 
         // Phase 1: decide the chunk's octree structure by histogramming points into a per-chunk
         // local count grid and merging cells under the leaf budget, recursing into any cell still
@@ -98,7 +99,7 @@ public:
 
         // Phase 2: sample the structure bottom-up, one point per 128^3 cell, emitting each
         // descendant node's COPC chunk. The chunk root's promoted points go to <root>.bin.
-        std::vector<int> accepted = sampleStructure(m_root);
+        std::vector<Idx> accepted = sampleStructure(m_root);
         writeBin(m_root, accepted);
     }
 
@@ -106,21 +107,21 @@ private:
     // Phase 1. Recursively histogram `indices` into a local grid below `node`, merge
     // cells under LeafPointBudget into this node's octree leaves, and recurse into oversized cells.
     // Populates m_leafSet / m_leafPoints / m_occupied.
-    void buildStructure(const VoxelKey& node, std::vector<int>&& indices);
+    void buildStructure(const VoxelKey& node, std::vector<Idx>&& indices);
     // Record `node` as a finished leaf holding `indices`, and mark it and its ancestors occupied.
-    void markLeaf(const VoxelKey& node, std::vector<int>&& indices);
+    void markLeaf(const VoxelKey& node, std::vector<Idx>&& indices);
     // The depth-`depth` descendant of `startKey`, whose bounds are `startBounds`, holding point p.
     VoxelKey cellOf(const Point& p, const VoxelKey& startKey, const pdal::BOX3D& startBounds,
         int depth);
     // Phase 2. Sample node k bottom-up over the precomputed structure, emit children's chunks,
     // and return the points promoted to k.
-    std::vector<int> sampleStructure(const VoxelKey& k);
+    std::vector<Idx> sampleStructure(const VoxelKey& k);
 
     // Build a self-contained chunk for `indices` and hand it to the ChunkWriter for deferred
     // compression and writing.
-    void emit(const VoxelKey& key, const std::vector<int>& indices);
+    void emit(const VoxelKey& key, const std::vector<Idx>& indices);
     // Write the chunk root's promoted points to <root>.bin (the subsample the merge phase reads).
-    void writeBin(const VoxelKey& key, const std::vector<int>& indices);
+    void writeBin(const VoxelKey& key, const std::vector<Idx>& indices);
 
     const BaseInfo& m_b;
     PyramidManager& m_mgr;
@@ -129,11 +130,12 @@ private:
     PointAccessor m_points;
     // Octree structure for this chunk, filled by buildStructure and consumed by sampleStructure.
     std::unordered_set<VoxelKey> m_leafSet;                       // the leaves
-    std::unordered_map<VoxelKey, std::vector<int>> m_leafPoints;  // leaf -> its point indices
+    std::unordered_map<VoxelKey, std::vector<Idx>> m_leafPoints;  // leaf -> its point indices
     std::unordered_set<VoxelKey> m_occupied;                      // every node that exists
 };
 
-VoxelKey ChunkBuilder::cellOf(const Point& p, const VoxelKey& startKey,
+template <typename Idx>
+VoxelKey ChunkBuilder<Idx>::cellOf(const Point& p, const VoxelKey& startKey,
     const pdal::BOX3D& startBounds, int depth)
 {
     VoxelKey k = startKey;
@@ -152,7 +154,8 @@ VoxelKey ChunkBuilder::cellOf(const Point& p, const VoxelKey& startKey,
     return k;
 }
 
-void ChunkBuilder::markLeaf(const VoxelKey& node, std::vector<int>&& indices)
+template <typename Idx>
+void ChunkBuilder<Idx>::markLeaf(const VoxelKey& node, std::vector<Idx>&& indices)
 {
     m_leafSet.insert(node);
     m_leafPoints[node] = std::move(indices);
@@ -167,7 +170,8 @@ void ChunkBuilder::markLeaf(const VoxelKey& node, std::vector<int>&& indices)
     }
 }
 
-void ChunkBuilder::buildStructure(const VoxelKey& node, std::vector<int>&& indices)
+template <typename Idx>
+void ChunkBuilder<Idx>::buildStructure(const VoxelKey& node, std::vector<Idx>&& indices)
 {
     // Small enough or too deep to split: this node is a leaf holding all its points.
     if (indices.size() <= LeafPointBudget || node.level() >= MaxBuildLevel)
@@ -181,8 +185,8 @@ void ChunkBuilder::buildStructure(const VoxelKey& node, std::vector<int>&& indic
         MaxBuildLevel - node.level());
     const pdal::BOX3D nodeBounds = VoxelInfo(m_b.bounds, node).bounds();
 
-    std::unordered_map<VoxelKey, std::vector<int>> cells;
-    for (int idx : indices)
+    std::unordered_map<VoxelKey, std::vector<Idx>> cells;
+    for (Idx idx : indices)
         cells[cellOf(m_points[idx], node, nodeBounds, depth)].push_back(idx);
 
     // Merge cells under the leaf budget into the cut nodes, this node's octree leaves at this
@@ -197,7 +201,7 @@ void ChunkBuilder::buildStructure(const VoxelKey& node, std::vector<int>&& indic
 
     // Group each cell's points under its covering cut node. As a fallback, a small standalone cell
     // that planChunkRoots left out becomes its own leaf.
-    std::unordered_map<VoxelKey, std::vector<int>> cutPoints;
+    std::unordered_map<VoxelKey, std::vector<Idx>> cutPoints;
     for (auto& c : cells)
     {
         VoxelKey r = c.first;
@@ -205,7 +209,7 @@ void ChunkBuilder::buildStructure(const VoxelKey& node, std::vector<int>&& indic
             r = r.parent();
         if (!cutSet.count(r))
             r = c.first;
-        std::vector<int>& dst = cutPoints[r];
+        std::vector<Idx>& dst = cutPoints[r];
         dst.insert(dst.end(), c.second.begin(), c.second.end());
     }
 
@@ -220,14 +224,15 @@ void ChunkBuilder::buildStructure(const VoxelKey& node, std::vector<int>&& indic
     }
 }
 
-std::vector<int> ChunkBuilder::sampleStructure(const VoxelKey& k)
+template <typename Idx>
+std::vector<Idx> ChunkBuilder<Idx>::sampleStructure(const VoxelKey& k)
 {
     // Leaf: hand its points up unchanged; the parent samples them and emits this node's chunk.
     if (m_leafSet.count(k))
         return std::move(m_leafPoints[k]);
 
     // Internal node: gather the points each occupied child promoted upward.
-    std::array<std::vector<int>, 8> childAccepted;
+    std::array<std::vector<Idx>, 8> childAccepted;
     for (int dir = 0; dir < 8; ++dir)
     {
         const VoxelKey c = k.child(dir);
@@ -239,12 +244,13 @@ std::vector<int> ChunkBuilder::sampleStructure(const VoxelKey& k)
     // the rest are rejected back to their child and become that child's COPC chunk. Order is
     // irrelevant, since only cell occupancy is tested.
     VoxelInfo vi(m_b.bounds, k);
-    VoxelInfo::Grid& grid = vi.grid();
-    std::vector<int> accepted;
-    std::array<std::vector<int>, 8> rejected;
+    // Not VoxelInfo::Grid: that maps to int, and these are chunk-local Idx indices.
+    std::unordered_map<GridKey, Idx> grid;
+    std::vector<Idx> accepted;
+    std::array<std::vector<Idx>, 8> rejected;
     for (int dir = 0; dir < 8; ++dir)
     {
-        for (int idx : childAccepted[dir])
+        for (Idx idx : childAccepted[dir])
         {
             GridKey gk = vi.gridKey(m_points[idx]);
             if (grid.find(gk) == grid.end())
@@ -266,7 +272,8 @@ std::vector<int> ChunkBuilder::sampleStructure(const VoxelKey& k)
     return accepted;
 }
 
-void ChunkBuilder::emit(const VoxelKey& key, const std::vector<int>& indices)
+template <typename Idx>
+void ChunkBuilder<Idx>::emit(const VoxelKey& key, const std::vector<Idx>& indices)
 {
     using namespace pdal;
 
@@ -296,7 +303,7 @@ void ChunkBuilder::emit(const VoxelKey& key, const std::vector<int>& indices)
 
     std::vector<char> records(indices.size() * m_b.pointSize);
     char* dst = records.data();
-    for (int idx : indices)
+    for (Idx idx : indices)
     {
         std::memcpy(dst, m_points[idx].cdata(), m_b.pointSize);
         dst += m_b.pointSize;
@@ -306,7 +313,8 @@ void ChunkBuilder::emit(const VoxelKey& key, const std::vector<int>& indices)
         std::move(stats), indices.size()});
 }
 
-void ChunkBuilder::writeBin(const VoxelKey& key, const std::vector<int>& indices)
+template <typename Idx>
+void ChunkBuilder<Idx>::writeBin(const VoxelKey& key, const std::vector<Idx>& indices)
 {
     if (indices.empty())
         return;
@@ -317,7 +325,7 @@ void ChunkBuilder::writeBin(const VoxelKey& key, const std::vector<int>& indices
         std::ofstream out(os::toNative(tmpFilename), std::ios::binary | std::ios::trunc);
         if (!out)
             throw FatalError("Couldn't open '" + tmpFilename + "' for output.");
-        for (int i : indices)
+        for (Idx i : indices)
             out.write(m_points[i].cdata(), m_b.pointSize);
     }
     // Write-then-rename rather than truncating in place: when `key` is a leaf chunk root, its
@@ -362,8 +370,21 @@ void indexPlans(const BaseInfo& b, PyramidManager& mgr, std::vector<ChunkPlan>& 
                     consumed.push_back(l.second.filename());
 
             {
-                ChunkBuilder cb(b, mgr, std::move(*pp));
-                cb.run();
+                // Pick the index width per chunk: int32 normally, int64 for the rare chunk the
+                // narrow index space can't address (an unsplittable coincident cluster).
+                uint64_t chunkPoints = 0;
+                for (const auto& l : pp->leaves)
+                    chunkPoints += l.second.numPoints();
+                if (chunkPoints > MaxNarrowChunkPoints)
+                {
+                    ChunkBuilder<int64_t> cb(b, mgr, std::move(*pp));
+                    cb.run();
+                }
+                else
+                {
+                    ChunkBuilder<int32_t> cb(b, mgr, std::move(*pp));
+                    cb.run();
+                }
             } // ChunkBuilder and its PointAccessor destroyed here, so leaf files are unmapped.
 
             for (const std::string& fn : consumed)

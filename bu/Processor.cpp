@@ -338,7 +338,7 @@ Processor::writeOctantCompressed(const OctantInfo& o, Index& index, IndexIter po
         // to the records buffer.  Otherwise, advance the position.
         while (true)
         {
-            if (pos == index.end() || *pos >= fii->start() + fii->numPoints())
+            if (pos == index.end() || (uint64_t)*pos >= fii->start() + fii->numPoints())
             {
                 count += std::distance(begin, pos);
                 appendCompressed(records, *fii, begin, pos);
@@ -353,7 +353,7 @@ Processor::writeOctantCompressed(const OctantInfo& o, Index& index, IndexIter po
                     fii++;
                     if (fii == fiiEnd)
                         goto flush;
-                } while (*begin >= fii->start() + fii->numPoints());
+                } while ((uint64_t)*begin >= fii->start() + fii->numPoints());
             }
             pos++;
         }
