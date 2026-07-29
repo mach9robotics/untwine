@@ -28,13 +28,15 @@ namespace chunker
 // the indexing pool; 2^31-1 as budget cost +30% wall on two_traj).
 constexpr uint64_t DefaultMaxChunkPoints = 5'000'000;
 
-// Trigger for the re-chunk pass: a chunk over this many points is split after distribute. Set to
-// the hard ceiling of the chunk-local build's 32-bit index space, so re-chunking is purely a
-// correctness repair for cells the planner couldn't resolve — chunks between the planning budget
-// and this trigger are left alone (the chunk-local build handles them fine given RAM; splitting
-// them costs a full rewrite of their temp bytes). Once triggered, a chunk is split down to the
-// planning budget, restoring normal per-chunk RAM and parallelism.
-constexpr uint64_t RechunkTriggerPoints = 2'147'483'647;
+// Trigger for the re-chunk pass: a chunk over this many points is split after distribute. A pure
+// performance bound, not a correctness one (the chunk-local build picks a 64-bit index width for
+// over-2^31 chunks and handles any size, bounded by RAM): past the trigger, restoring per-chunk
+// RAM and parallelism outweighs rewriting the chunk's temp bytes. Chunks between the planning
+// budget and this trigger are left to the in-RAM build. Once triggered, a chunk is split down to
+// the planning budget. Chosen from a 10/20/50/100M sweep on medium_mx9 (one 382M-point count
+// cell, 16 GB box): 10-50M tie at the optimum (-46% wall vs no split), 100M forfeits part of the
+// win through the merge. Overridable via UNTWINE_RECHUNK_TRIGGER.
+constexpr uint64_t RechunkTriggerPoints = 20'000'000;
 
 // Count-grid resolution tiers (see countGridLevel). The count pass histograms points into an
 // octree grid this many levels deep, finer for larger clouds so cells stay small relative to the

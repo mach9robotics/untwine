@@ -78,16 +78,17 @@ void Chunker::run(ProgressWriter& progress, std::vector<FileInfo>& fileInfos)
                   << " | chunks " << lut.roots.size() << "\n";
 
 
+
     // Chunking step 2b, distribute: decode again and route each point through the LUT into its
     // chunk's .bin. The Indexing phase bu::indexChunks then builds a local octree from each.
     distribute(m_b, fileInfos, grid, lut, progress);
 
     // Chunking step 3, re-chunk: the budget is soft — a single count-grid cell over the budget
-    // becomes its own chunk whole, so a degenerate cell can exceed the Indexing phase's 32-bit
-    // index space. Recursively split any chunk past that ceiling (packed-point read/route, no
-    // decode) back down to the planning budget. Chunks merely over the budget are left alone —
-    // the chunk-local build splits those in RAM. Costs nothing when nothing crosses the trigger,
-    // the normal case.
+    // becomes its own chunk whole, and a huge chunk serializes and thrashes the Indexing phase
+    // (one single-threaded in-RAM build per chunk). Recursively split any chunk past the trigger
+    // (packed-point read/route, no decode) back down to the planning budget. Chunks merely over
+    // the budget are left alone — the chunk-local build splits those in RAM. Costs nothing when
+    // nothing crosses the trigger, the normal case.
     size_t split = rechunkOversized(m_b.opts.tempDir, m_b.bounds, m_b.pointSize, lut,
         cellCounts, trigger, target);
     if (split && m_b.opts.progressDebug)

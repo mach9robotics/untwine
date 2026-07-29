@@ -31,12 +31,12 @@ struct ChunkLut;
 // Chunking step 3, re-chunk: the plan's per-chunk budget is soft — a single count-grid cell over
 // the budget becomes its own chunk whole (planChunkRoots' oversized-leaf case and buildChunkLut's
 // fallback), so a dense or coincident-heavy region can produce a chunk far larger than the budget.
-// The Indexing phase loads a whole chunk into RAM and indexes it with 32-bit point indices, so an
-// unbounded chunk is both a thrash risk and, past INT_MAX points, undefined behavior. These
-// functions restore the budget after the distribute pass by recursively splitting any oversized
-// chunk .bin into its child octants — a packed-point read/route/append with no PDAL decode,
-// mirroring the EPF Reprocessor. A truly coincident cluster can never split, so recursion also
-// stops at MaxRechunkLevel; the Indexing phase guards the residual case.
+// The Indexing phase loads a whole chunk into RAM and builds it on one thread, so a huge chunk
+// serializes the phase and thrashes constrained boxes. These functions restore the budget after
+// the distribute pass by recursively splitting any over-trigger chunk .bin into its descendant
+// octants — a packed-point read/route/append with no PDAL decode, mirroring the EPF Reprocessor.
+// A truly coincident cluster can never split, so recursion also stops at MaxRechunkLevel; the
+// Indexing phase builds whatever passes through (an over-2^31 chunk gets 64-bit indices).
 
 // The bounds of voxel `key` within `fullBounds`: the same subdivision bu::VoxelInfo::bounds()
 // computes, without dragging in that class's sampling machinery.
