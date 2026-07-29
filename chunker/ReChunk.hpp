@@ -55,12 +55,14 @@ std::array<uint64_t, 8> countOctants(const char *data, uint64_t count, size_t po
 std::vector<VoxelKey> rechunkFile(const std::string& tempDir, const pdal::BOX3D& fullBounds,
     size_t pointSize, const VoxelKey& key, uint64_t target);
 
-// Split every chunk whose planned point count exceeds `target`. Chunk counts are derived from the
-// count-pass histogram and the LUT, so untouched chunks cost nothing. Returns the number of
-// oversized chunks that were split.
+// Split every chunk whose planned point count exceeds `trigger` down to at most `target` points
+// each. The thresholds are deliberately distinct: `trigger` (RechunkTriggerPoints) says when a
+// chunk is dangerous, `target` (the planning budget) says what to split it into once the rewrite
+// is being paid for anyway. Chunk counts are derived from the count-pass histogram and the LUT,
+// so untouched chunks cost nothing. Returns the number of chunks that were split.
 size_t rechunkOversized(const std::string& tempDir, const pdal::BOX3D& fullBounds,
     size_t pointSize, const ChunkLut& lut,
-    const std::unordered_map<VoxelKey, uint64_t>& cellCounts, uint64_t target);
+    const std::unordered_map<VoxelKey, uint64_t>& cellCounts, uint64_t trigger, uint64_t target);
 
 } // namespace chunker
 } // namespace untwine

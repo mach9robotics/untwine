@@ -269,43 +269,56 @@ TEST(ReChunk, coincident_points_stop_at_level_cap)
     EXPECT_EQ(bins.at(out[0].toString()).size(), pts.size());
 }
 
-// rechunkOversized touches only chunks whose planned count exceeds the target: the oversized
-// cell's chunk is split, the under-budget chunk's .bin is left byte-identical.
-TEST(ReChunk, only_oversized_chunks_are_split)
+// rechunkOversized selects by the trigger but splits down to the target: a chunk over the trigger
+// is split into target-sized pieces, one merely over the target (but under the trigger) is left
+// byte-identical, as is one under both.
+TEST(ReChunk, trigger_selects_target_splits)
 {
-    const std::string dir = testDir("oversized_only");
+    const std::string dir = testDir("trigger_vs_target");
     const pdal::BOX3D full = cube(0, 8);
 
-    const VoxelKey small(0, 0, 0, 2);   // bounds (0..2)^3
-    const VoxelKey big(1, 1, 1, 2);     // bounds (2..4)^3
+    const VoxelKey small(0, 0, 0, 2);   // bounds (0..2)^3, under target
+    const VoxelKey mid(3, 3, 3, 2);     // bounds (6..8)^3, over target, under trigger
+    const VoxelKey big(1, 1, 1, 2);     // bounds (2..4)^3, over trigger
 
     std::vector<TestPoint> smallPts{ {0.5, 0.5, 0.5, 100}, {1.5, 1.5, 1.5, 101} };
+    std::vector<TestPoint> midPts;
+    for (int i = 0; i < 6; ++i)   // 6 pts: over target 4, under trigger 7
+        midPts.push_back({6.5 + (i & 1), 6.5 + ((i >> 1) & 1), 6.5 + ((i >> 2) & 1),
+            (uint64_t)(200 + i)});
     std::vector<TestPoint> bigPts;
-    for (int i = 0; i < 8; ++i)   // one point per octant of (2..4)^3
+    for (int i = 0; i < 8; ++i)   // 8 pts, one per octant of (2..4)^3: over trigger 7
         bigPts.push_back({2.5 + (i & 1), 2.5 + ((i >> 1) & 1), 2.5 + ((i >> 2) & 1),
             (uint64_t)i});
     writeBin(dir, small, smallPts);
+    writeBin(dir, mid, midPts);
     writeBin(dir, big, bigPts);
 
     ChunkLut lut;
-    lut.roots = { small, big };
-    lut.cellToRoot = { { small, small }, { big, big } };
+    lut.roots = { small, mid, big };
+    lut.cellToRoot = { { small, small }, { mid, mid }, { big, big } };
     std::unordered_map<VoxelKey, uint64_t> cellCounts{
-        { small, smallPts.size() }, { big, bigPts.size() } };
+        { small, smallPts.size() }, { mid, midPts.size() }, { big, bigPts.size() } };
 
-    const size_t split = rechunkOversized(dir, full, PointSize, lut, cellCounts, 4);
+    const size_t split = rechunkOversized(dir, full, PointSize, lut, cellCounts,
+        /*trigger=*/7, /*target=*/4);
     EXPECT_EQ(split, 1u);
 
     auto bins = readAllBins(dir);
-    ASSERT_TRUE(bins.count(small.toString())) << "under-budget chunk must be untouched";
+    ASSERT_TRUE(bins.count(small.toString())) << "under-target chunk must be untouched";
     EXPECT_EQ(bins.at(small.toString()).size(), smallPts.size());
-    EXPECT_EQ(bins.count(big.toString()), 0u) << "oversized chunk should have been split";
+    ASSERT_TRUE(bins.count(mid.toString()))
+        << "chunk between target and trigger must be untouched";
+    EXPECT_EQ(bins.at(mid.toString()).size(), midPts.size());
+    EXPECT_EQ(bins.count(big.toString()), 0u) << "over-trigger chunk should have been split";
 
+    // The split chunk's pieces respect the target; the untouched mid chunk legitimately doesn't.
     size_t total = 0;
     for (const auto& b : bins)
     {
-        EXPECT_LE(b.second.size(), 4u);
+        if (b.first != mid.toString())
+            EXPECT_LE(b.second.size(), 4u);
         total += b.second.size();
     }
-    EXPECT_EQ(total, smallPts.size() + bigPts.size());
+    EXPECT_EQ(total, smallPts.size() + midPts.size() + bigPts.size());
 }

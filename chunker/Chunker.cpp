@@ -69,11 +69,13 @@ void Chunker::run(ProgressWriter& progress, std::vector<FileInfo>& fileInfos)
     distribute(m_b, fileInfos, grid, lut, progress);
 
     // Chunking step 3, re-chunk: the budget is soft — a single count-grid cell over the budget
-    // became its own chunk whole. Recursively split any such chunk's .bin (packed-point
-    // read/route, no decode) so the Indexing phase never loads an unbounded chunk. Costs nothing
-    // when no chunk is oversized, the normal case.
+    // becomes its own chunk whole, so a degenerate cell can exceed the Indexing phase's 32-bit
+    // index space. Recursively split any chunk past that ceiling (packed-point read/route, no
+    // decode) back down to the planning budget. Chunks merely over the budget are left alone —
+    // the chunk-local build splits those in RAM. Costs nothing when nothing crosses the trigger,
+    // the normal case.
     size_t split = rechunkOversized(m_b.opts.tempDir, m_b.bounds, m_b.pointSize, lut,
-        cellCounts, target);
+        cellCounts, RechunkTriggerPoints, target);
     if (split && m_b.opts.progressDebug)
         std::cerr << "[chunking] re-chunked " << split << " oversized chunk(s)\n";
 }

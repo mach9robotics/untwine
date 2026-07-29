@@ -10,6 +10,7 @@
  *                                                                           *
  ****************************************************************************/
 
+#include <algorithm>
 #include <cmath>
 #include <fstream>
 #include <thread>
@@ -193,8 +194,11 @@ std::vector<VoxelKey> rechunkFile(const std::string& tempDir, const pdal::BOX3D&
 
 size_t rechunkOversized(const std::string& tempDir, const pdal::BOX3D& fullBounds,
     size_t pointSize, const ChunkLut& lut,
-    const std::unordered_map<VoxelKey, uint64_t>& cellCounts, uint64_t target)
+    const std::unordered_map<VoxelKey, uint64_t>& cellCounts, uint64_t trigger, uint64_t target)
 {
+    // A split target above the trigger would recreate over-trigger chunks; clamp.
+    target = (std::min)(target, trigger);
+
     // Planned point count per chunk. Merged (internal) roots hold <= target by construction, so
     // only oversized count-grid cells that became their own chunks can exceed it.
     std::unordered_map<VoxelKey, uint64_t> rootCounts;
@@ -203,7 +207,7 @@ size_t rechunkOversized(const std::string& tempDir, const pdal::BOX3D& fullBound
 
     std::vector<VoxelKey> oversized;
     for (const auto& rc : rootCounts)
-        if (rc.second > target)
+        if (rc.second > trigger)
             oversized.push_back(rc.first);
     if (oversized.empty())
         return 0;

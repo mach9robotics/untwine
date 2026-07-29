@@ -21,9 +21,20 @@ namespace untwine
 namespace chunker
 {
 
-// Default per-chunk point budget used when --max_chunk_points is 0/unset. Chosen from profiling:
-// large enough to keep the merge phase small, small enough for good per-chunk parallelism.
+// Default per-chunk point budget used when --max_chunk_points is 0/unset. This is the PLANNING
+// threshold: chunk boundaries merge up the octree until one level higher would exceed it. Chosen
+// from profiling: large enough to keep the merge phase small, small enough for good per-chunk
+// parallelism (both extremes lose — tiny budgets bloat the merge, huge ones starve distribute and
+// the indexing pool; 2^31-1 as budget cost +30% wall on two_traj).
 constexpr uint64_t DefaultMaxChunkPoints = 5'000'000;
+
+// Trigger for the re-chunk pass: a chunk over this many points is split after distribute. Set to
+// the hard ceiling of the chunk-local build's 32-bit index space, so re-chunking is purely a
+// correctness repair for cells the planner couldn't resolve — chunks between the planning budget
+// and this trigger are left alone (the chunk-local build handles them fine given RAM; splitting
+// them costs a full rewrite of their temp bytes). Once triggered, a chunk is split down to the
+// planning budget, restoring normal per-chunk RAM and parallelism.
+constexpr uint64_t RechunkTriggerPoints = 2'147'483'647;
 
 // Count-grid resolution tiers (see countGridLevel). The count pass histograms points into an
 // octree grid this many levels deep, finer for larger clouds so cells stay small relative to the
