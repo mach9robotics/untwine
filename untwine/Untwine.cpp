@@ -22,6 +22,7 @@
 #include "ProgressWriter.hpp"
 
 #include "bu/BuPyramid.hpp"
+#include "chunker/Chunker.hpp"
 #include "epf/Epf.hpp"
 #include "prep/FilePrep.hpp"
 
@@ -56,6 +57,10 @@ void addArgs(pdal::ProgramArgs& programArgs, Options& options, pdal::Arg * &temp
         options.metadata, false);
     programArgs.add("no_srs", "PDAL readers.las.nosrs passthrough.",
         options.no_srs, false);
+    programArgs.add("max_chunk_points", "Per-chunk point budget for --chunker (0 = auto).",
+        options.maxChunkPoints, (uint64_t)0);
+    programArgs.add("chunker", "Use the counting-sort front-end instead of EPF binning "
+        "(experimental).", options.chunker, false);
 }
 
 bool handleOptions(pdal::StringList& arglist, Options& options)
@@ -172,9 +177,20 @@ int main(int argc, char *argv[])
         prep::FilePrep filePrep(common);
         std::vector<FileInfo> fileInfos = filePrep.run();
 
-        epf::Epf preflight(common);
-        preflight.run(progress, fileInfos);
+        if (options.chunker)
+        {
+            // Counting-sort front-end (count -> plan -> distribute) writes one .bin per chunk.
+            chunker::Chunker chunker(common);
+            chunker.run(progress, fileInfos);
+        }
+        else
+        {
+            epf::Epf preflight(common);
+            preflight.run(progress, fileInfos);
+        }
 
+        // BU assembles the octree: in chunker mode it builds each chunk + the cap; otherwise the
+        // normal per-node path.
         bu::BuPyramid builder(common);
         builder.run(progress);
     }

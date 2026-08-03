@@ -30,6 +30,32 @@ cmake ..
 make
 ```
 
+Running unit tests
+------------------
+
+Tests are built only when `BUILD_TESTING` is enabled. Re-run `cmake` after adding
+test files, since the sources are globbed.
+
+```
+cmake -B build -DBUILD_TESTING=ON
+cmake --build build --target untwine_test untwine_unit_test -j
+cd build && ctest --output-on-failure
+```
+
+There are two test executables (in `build/bin`):
+
+- `untwine_unit_test` — fast, pure-logic unit tests for each pipeline step
+  (`prep`/`EPF` grid binning, `reprocess` re-split, `BU` stats rollup) plus
+  integration tests for the seams between steps. Needs no input data.
+- `untwine_test` — an end-to-end test that runs the `untwine` binary on the
+  sample clouds in `test/data` and verifies the output stats.
+
+Run an executable directly to filter cases, e.g.:
+
+```
+./build/bin/untwine_unit_test --gtest_filter='Integration.*'
+```
+
 Using Untwine
 -------------
 

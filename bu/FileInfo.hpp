@@ -12,6 +12,7 @@
 
 #pragma once
 
+#include <cstdint>
 #include <list>
 
 #include <mapfile.hpp>  // untwine/os
@@ -24,21 +25,21 @@ namespace bu
 class FileInfo
 {
 public:
-    FileInfo(const std::string& filename, int numPoints) :
+    FileInfo(const std::string& filename, uint64_t numPoints) :
         m_filename(filename), m_numPoints(numPoints)
     {}
 
     std::string filename() const
         { return m_filename; }
 
-    int numPoints() const
+    uint64_t numPoints() const
         { return m_numPoints; }
 
     // When sampling we give a single set of indices to the points in the various
     // input files. m_start is the starting index of the points in this file.
-    void setStart(int start)
+    void setStart(uint64_t start)
         { m_start = start; }
-    int start() const
+    uint64_t start() const
         { return m_start; }
 
     char *address() const
@@ -51,8 +52,8 @@ public:
 
 private:
     std::string m_filename;
-    int m_numPoints {0};
-    int m_start {0};
+    uint64_t m_numPoints {0};
+    uint64_t m_start {0};
     untwine::os::MapContext m_ctx;
 };
 using FileInfoList = std::list<FileInfo>;

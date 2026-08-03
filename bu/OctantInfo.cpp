@@ -35,7 +35,7 @@ void OctantInfo::mergeSmallFiles(const std::string tempDir, size_t pointSize)
     while (it != m_fileInfos.end())
     {
         FileInfo& fi = *it;
-        int numPoints = fi.numPoints();
+        uint64_t numPoints = fi.numPoints();
         std::vector<char> buf(1500 * pointSize);
         if (numPoints < 1500)
         {

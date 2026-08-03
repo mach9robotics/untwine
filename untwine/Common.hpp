@@ -56,6 +56,10 @@ struct Options
     bool no_srs;
     bool metadata;
     bool dummy;
+    // Per-chunk point budget for the chunker front-end (0 = auto).
+    uint64_t maxChunkPoints;
+    // Experimental counting-sort front-end (see chunker/Chunker); replaces EPF binning.
+    bool chunker;
 };
 
 template<typename T>
