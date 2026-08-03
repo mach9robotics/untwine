@@ -13,6 +13,7 @@
 #include <array>
 #include <cmath>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
 #include <functional>
 #include <limits>
@@ -331,8 +332,10 @@ void ChunkBuilder<Idx>::writeBin(const VoxelKey& key, const std::vector<Idx>& in
     // Write-then-rename rather than truncating in place: when `key` is a leaf chunk root, its
     // original voxel .bin is still mmap'd by m_points. Renaming over it is safe on POSIX, since the
     // mapping holds the old inode until this ChunkBuilder is destroyed, whereas truncating it
-    // would corrupt the points we are reading.
-    pdal::FileUtils::renameFile(fullFilename, tmpFilename);
+    // would corrupt the points we are reading. std::filesystem::rename throws on failure —
+    // notably on Windows, where replacing the still-mapped file fails — rather than silently
+    // leaving the raw .bin in place as the subsample.
+    std::filesystem::rename(tmpFilename, fullFilename);
 }
 
 // Index a set of prepared chunk plans in parallel, one local octree per chunk. The tail of the
