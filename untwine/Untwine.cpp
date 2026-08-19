@@ -57,10 +57,13 @@ void addArgs(pdal::ProgramArgs& programArgs, Options& options, pdal::Arg * &temp
         options.metadata, false);
     programArgs.add("no_srs", "PDAL readers.las.nosrs passthrough.",
         options.no_srs, false);
-    programArgs.add("max_chunk_points", "Per-chunk point budget for --chunker (0 = auto).",
-        options.maxChunkPoints, (uint64_t)0);
-    programArgs.add("chunker", "Use the counting-sort front-end instead of EPF binning "
-        "(experimental).", options.chunker, false);
+    programArgs.add("max_chunk_points", "Per-chunk point budget for the chunker front-end "
+        "(0 = auto).", options.maxChunkPoints, (uint64_t)0);
+    // The chunker is the default front-end. The switch is phrased as the opt-out because
+    // ProgramArgs bool switches invert their default: a bare '--chunker' on a true default
+    // would have quietly turned the chunker OFF.
+    programArgs.add("legacy_epf", "Use the original EPF binning front-end instead of the "
+        "counting-sort chunker.", options.legacyEpf, false);
 }
 
 bool handleOptions(pdal::StringList& arglist, Options& options)
@@ -103,6 +106,7 @@ bool handleOptions(pdal::StringList& arglist, Options& options)
             options.tempDir = options.outputName + "_tmp";
         }
         options.stats = true;
+        options.chunker = !options.legacyEpf;
 
         if (options.progressFd == 1 && options.progressDebug)
         {
